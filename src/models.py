@@ -764,7 +764,7 @@ if __name__ == "__main__":
     gp = train_gp(
         X_train_sc, 
         y_train_sc,
-        kernel_type='matern52',  # Prova anche 'matern32' o 'rbf'
+        kernel_type='matern52',  # final kernel for inverse optimization stability
         n_restarts=10,
         verbose=True
     )
