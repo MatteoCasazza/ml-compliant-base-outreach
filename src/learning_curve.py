@@ -142,7 +142,7 @@ def run_learning_curve():
     print(f"Fixed test samples: {len(X_test)}")
 
     # Maximum training size is the training pool size
-    train_sizes = [20, 40, 60, 80, 100, 130, 150, len(X_pool)]
+    train_sizes = [20, 40, 60, 80, 100, 150, 200, 250, 300, 350, len(X_pool)]
 
     # Remove possible duplicates
     train_sizes = sorted(list(set(train_sizes)))

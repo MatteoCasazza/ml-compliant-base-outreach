@@ -213,7 +213,7 @@ def simulate_parameter_set(
 
 
 def generate_dataset(
-    n_samples: int = 220,
+    n_samples: int = 500,
     param_ranges: Optional[ParameterRanges] = None,
     T_sim: float = 60.0,
     dt: float = 0.001,
@@ -533,7 +533,7 @@ if __name__ == "__main__":
     # ========== CONFIGURAZIONE ==========
     # Per test veloce: usa pochi campioni
     # Per dataset finale: usa 220+
-    N_SAMPLES_TEST = 220  # Cambia a 220 per dataset finale
+    N_SAMPLES_TEST = 500  
     
     # ========== GENERAZIONE DATASET ==========
     param_ranges = ParameterRanges()
