@@ -1,0 +1,14 @@
+Gaussian Process Surrogate Model
+========================================
+Kernel type: matern52
+Input parameters: ['Kb', 'Kr', 'Mb', 'hb', 'hr', 'f0', 'f1', 'A', 'x_r_start']
+Alpha: 1e-06
+Target: peak_y
+
+Optimized kernel:
+12.1**2 * Matern(length_scale=[28, 53.6, 5.7, 16, 7.73, 367, 8.03, 31.1, 172], nu=2.5) + WhiteKernel(noise_level=0.0104)
+
+Test metrics:
+R2:   0.975996
+RMSE: 0.016314 m
+MAE:  0.007363 m

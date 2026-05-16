@@ -1,0 +1,2 @@
+label,percentile,target,bo_best_y_sim,bo_best_error_m,bo_best_error_mm,bo_best_iteration,bo_best_Kr,bo_best_hr,bo_best_f0,bo_best_f1,bo_best_A,bo_best_x_r_start,de_y_sim,de_error_m,de_error_mm,bo_minus_de_error_mm,bo_better_than_de,n_initial,n_iter,total_evaluations,kappa,n_candidates
+target5_p80,80,0.681966,0.6793015005108811,0.0026644994891188434,2.6644994891188434,30,406.1972127265459,0.867457756371974,0.007647569750744249,9.658379004525155,0.19455088549920085,0.4763484517089677,0.68147,0.0004959999999999409,0.49599999999994093,2.1684994891189024,False,10,40,50,0.5,3000

@@ -9,8 +9,8 @@ Dimostrare che, pur essendo RF competitivo, il GP è preferibile per:
 - ARD interpretability
 - Integrazione in inverse optimization
 
-Author: [Il tuo nome]
-Date: 2025
+Author: MatteoCasazza
+Date: 2026
 """
 
 import numpy as np

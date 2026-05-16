@@ -23,14 +23,13 @@ Fixed parameters:
     Kb, Mb, hb, Mr
 
 Main outputs when RUN_ALL_TARGETS = True:
-    results/bo_results_all_targets.csv
-    results/bo_summary_all_targets.csv
-    figures/bo_vs_de_all_targets.png
-    figures/bo_convergence_all_targets.png
-    figures/bo_error_by_target.png
+    results/bo/bo_results_all_targets.csv
+    results/bo/bo_summary_all_targets.csv
+    figures/bo/bo_vs_de_all_targets.png
+    figures/bo/bo_convergence_all_targets.png
+    figures/bo/bo_error_by_target.png
 """
 
-import os
 import sys
 import warnings
 from pathlib import Path
@@ -50,6 +49,9 @@ from sklearn.preprocessing import StandardScaler
 # ---------------------------------------------------------------------
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = PROJECT_ROOT / "src"
+
+RESULTS_BO_DIR = PROJECT_ROOT / "results" / "bo"
+FIGURES_BO_DIR = PROJECT_ROOT / "figures" / "bo"
 
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
@@ -135,8 +137,8 @@ TARGETS = [
 # ---------------------------------------------------------------------
 def ensure_dirs():
     """Create output directories if needed."""
-    (PROJECT_ROOT / "results").mkdir(exist_ok=True)
-    (PROJECT_ROOT / "figures").mkdir(exist_ok=True)
+    RESULTS_BO_DIR.mkdir(parents=True, exist_ok=True)
+    FIGURES_BO_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def scale_unit_to_bounds(X_unit: np.ndarray) -> np.ndarray:
@@ -186,12 +188,9 @@ def extract_peak_y(sim_result) -> float:
     In this project, simulate_system() returns directly peak_y
     as a numpy.float64 scalar. Other cases are kept for robustness.
     """
-
-    # Case 0: scalar output, e.g. np.float64(0.6413)
     if isinstance(sim_result, (int, float, np.integer, np.floating)):
         return float(sim_result)
 
-    # Case 1: dictionary output
     if isinstance(sim_result, dict):
         if "peak_y" in sim_result:
             return float(sim_result["peak_y"])
@@ -207,7 +206,6 @@ def extract_peak_y(sim_result) -> float:
                 np.max(np.asarray(sim_result["xb"]) + np.asarray(sim_result["xr"]))
             )
 
-    # Case 2: object with attributes
     for attr in ["peak_y", "max_y", "y_peak"]:
         if hasattr(sim_result, attr):
             return float(getattr(sim_result, attr))
@@ -220,7 +218,6 @@ def extract_peak_y(sim_result) -> float:
         xr = np.asarray(getattr(sim_result, "xr"))
         return float(np.max(xb + xr))
 
-    # Case 3: tuple/list output
     if isinstance(sim_result, (tuple, list)):
         for item in sim_result:
             try:
@@ -235,10 +232,7 @@ def extract_peak_y(sim_result) -> float:
 
 
 def evaluate_simulator(x: np.ndarray, target: float) -> dict:
-    """
-    Evaluate true dynamic simulator for one controllable parameter vector.
-    """
-
+    """Evaluate true dynamic simulator for one controllable parameter vector."""
     full_params = vector_to_params(x)
 
     try:
@@ -280,7 +274,6 @@ def fit_bo_gp(X: np.ndarray, y: np.ndarray):
     This GP models:
         controllable parameters -> squared simulator error
     """
-
     scaler_X = StandardScaler()
     scaler_y = StandardScaler()
 
@@ -322,16 +315,12 @@ def select_next_point_lcb(
     Select next BO point using Lower Confidence Bound for minimization.
 
     LCB(x) = mu(x) - kappa * std(x)
-
-    Since we minimize the objective, we choose the point with minimum LCB.
     """
-
     candidates = sample_random_candidates(N_CANDIDATES, rng)
     candidates_scaled = scaler_X.transform(candidates)
 
     mu_scaled, std_scaled = gp.predict(candidates_scaled, return_std=True)
 
-    # Convert mean/std back to physical squared-error scale
     mu = scaler_y.inverse_transform(mu_scaled.reshape(-1, 1)).ravel()
     std = std_scaled * scaler_y.scale_[0]
 
@@ -347,10 +336,7 @@ def run_bayesian_optimization_for_target(
     de_y_sim: float,
     percentile: int | None = None,
 ) -> tuple[pd.DataFrame, dict]:
-    """
-    Run Bayesian Optimization for one target.
-    """
-
+    """Run Bayesian Optimization for one target."""
     rng = np.random.default_rng(RANDOM_STATE)
 
     de_error_m = abs(de_y_sim - target)
@@ -366,7 +352,6 @@ def run_bayesian_optimization_for_target(
     X_evaluated = []
     y_evaluated = []
 
-    # Initial LHS evaluations
     X_initial = sample_lhs_points(N_INITIAL, RANDOM_STATE)
 
     print("\nInitial simulator evaluations...")
@@ -392,7 +377,6 @@ def run_bayesian_optimization_for_target(
             f"error={eval_result['error_mm']:.3f} mm"
         )
 
-    # BO iterations
     print("\nBayesian Optimization iterations...")
     for it in range(1, N_ITER + 1):
         X_arr = np.asarray(X_evaluated)
@@ -429,7 +413,6 @@ def run_bayesian_optimization_for_target(
 
     df = pd.DataFrame(rows)
 
-    # Best-so-far columns
     df["best_error_m"] = df["error_m"].cummin()
     df["best_error_mm"] = df["error_mm"].cummin()
     df["de_y_sim"] = de_y_sim
@@ -477,9 +460,8 @@ def run_bayesian_optimization_for_target(
 # Plotting functions
 # ---------------------------------------------------------------------
 def plot_single_convergence(df: pd.DataFrame, summary: dict):
-    """Plot convergence for one target."""
     label = summary["label"]
-    fig_path = PROJECT_ROOT / "figures" / f"bo_convergence_{label}.png"
+    fig_path = FIGURES_BO_DIR / f"bo_convergence_{label}.png"
 
     plt.figure(figsize=(8, 5))
     plt.plot(df["iteration"], df["best_error_mm"], marker="o", linewidth=2)
@@ -497,14 +479,12 @@ def plot_single_convergence(df: pd.DataFrame, summary: dict):
     plt.tight_layout()
     plt.savefig(fig_path, dpi=300)
     plt.close()
-
     print(f"✓ Saved plot: {fig_path}")
 
 
 def plot_single_convergence_zoom(df: pd.DataFrame, summary: dict):
-    """Plot zoomed convergence for one target."""
     label = summary["label"]
-    fig_path = PROJECT_ROOT / "figures" / f"bo_convergence_zoom_{label}.png"
+    fig_path = FIGURES_BO_DIR / f"bo_convergence_zoom_{label}.png"
 
     df_zoom = df[df["iteration"] >= N_INITIAL]
 
@@ -525,14 +505,12 @@ def plot_single_convergence_zoom(df: pd.DataFrame, summary: dict):
     plt.tight_layout()
     plt.savefig(fig_path, dpi=300)
     plt.close()
-
     print(f"✓ Saved plot: {fig_path}")
 
 
 def plot_single_evaluations(df: pd.DataFrame, summary: dict):
-    """Plot all simulator evaluations for one target."""
     label = summary["label"]
-    fig_path = PROJECT_ROOT / "figures" / f"bo_evaluations_{label}.png"
+    fig_path = FIGURES_BO_DIR / f"bo_evaluations_{label}.png"
 
     initial = df[df["is_initial"] == True]
     bo_df = df[df["is_initial"] == False]
@@ -554,14 +532,12 @@ def plot_single_evaluations(df: pd.DataFrame, summary: dict):
     plt.tight_layout()
     plt.savefig(fig_path, dpi=300)
     plt.close()
-
     print(f"✓ Saved plot: {fig_path}")
 
 
 def plot_bo_vs_de_single(summary: dict):
-    """Bar plot BO vs DE for one target."""
     label = summary["label"]
-    fig_path = PROJECT_ROOT / "figures" / f"bo_vs_de_{label}.png"
+    fig_path = FIGURES_BO_DIR / f"bo_vs_de_{label}.png"
 
     labels = ["Bayesian Optimization", "Differential Evolution"]
     errors = [summary["bo_best_error_mm"], summary["de_error_mm"]]
@@ -584,13 +560,11 @@ def plot_bo_vs_de_single(summary: dict):
     plt.tight_layout()
     plt.savefig(fig_path, dpi=300)
     plt.close()
-
     print(f"✓ Saved plot: {fig_path}")
 
 
 def plot_bo_vs_de_all_targets(summary_df: pd.DataFrame):
-    """Bar plot comparing BO and DE errors across all targets."""
-    fig_path = PROJECT_ROOT / "figures" / "bo_vs_de_all_targets.png"
+    fig_path = FIGURES_BO_DIR / "bo_vs_de_all_targets.png"
 
     labels = [f"P{int(p)}" for p in summary_df["percentile"]]
     x = np.arange(len(labels))
@@ -632,13 +606,11 @@ def plot_bo_vs_de_all_targets(summary_df: pd.DataFrame):
     plt.tight_layout()
     plt.savefig(fig_path, dpi=300)
     plt.close()
-
     print(f"✓ Saved plot: {fig_path}")
 
 
 def plot_bo_convergence_all_targets(all_results_df: pd.DataFrame):
-    """Plot best-so-far BO convergence curves for all targets."""
-    fig_path = PROJECT_ROOT / "figures" / "bo_convergence_all_targets.png"
+    fig_path = FIGURES_BO_DIR / "bo_convergence_all_targets.png"
 
     plt.figure(figsize=(9, 5))
 
@@ -660,13 +632,11 @@ def plot_bo_convergence_all_targets(all_results_df: pd.DataFrame):
     plt.tight_layout()
     plt.savefig(fig_path, dpi=300)
     plt.close()
-
     print(f"✓ Saved plot: {fig_path}")
 
 
 def plot_bo_error_by_target(summary_df: pd.DataFrame):
-    """Plot BO and DE errors as a function of target outreach."""
-    fig_path = PROJECT_ROOT / "figures" / "bo_error_by_target.png"
+    fig_path = FIGURES_BO_DIR / "bo_error_by_target.png"
 
     plt.figure(figsize=(8, 5))
     plt.plot(
@@ -692,13 +662,11 @@ def plot_bo_error_by_target(summary_df: pd.DataFrame):
     plt.tight_layout()
     plt.savefig(fig_path, dpi=300)
     plt.close()
-
     print(f"✓ Saved plot: {fig_path}")
 
 
 def plot_bo_convergence_all_targets_zoom(all_results_df: pd.DataFrame):
-    """Plot zoomed best-so-far BO convergence curves for all targets."""
-    fig_path = PROJECT_ROOT / "figures" / "bo_convergence_all_targets_zoom.png"
+    fig_path = FIGURES_BO_DIR / "bo_convergence_all_targets_zoom.png"
 
     plt.figure(figsize=(9, 5))
 
@@ -723,7 +691,6 @@ def plot_bo_convergence_all_targets_zoom(all_results_df: pd.DataFrame):
     plt.tight_layout()
     plt.savefig(fig_path, dpi=300)
     plt.close()
-
     print(f"✓ Saved plot: {fig_path}")
 
 
@@ -731,11 +698,10 @@ def plot_bo_convergence_all_targets_zoom(all_results_df: pd.DataFrame):
 # Save and summary functions
 # ---------------------------------------------------------------------
 def save_single_target_outputs(df: pd.DataFrame, summary: dict):
-    """Save outputs for one target."""
     label = summary["label"]
 
-    results_path = PROJECT_ROOT / "results" / f"bo_results_{label}.csv"
-    summary_path = PROJECT_ROOT / "results" / f"bo_summary_{label}.csv"
+    results_path = RESULTS_BO_DIR / f"bo_results_{label}.csv"
+    summary_path = RESULTS_BO_DIR / f"bo_summary_{label}.csv"
 
     df.to_csv(results_path, index=False)
     pd.DataFrame([summary]).to_csv(summary_path, index=False)
@@ -750,7 +716,6 @@ def save_single_target_outputs(df: pd.DataFrame, summary: dict):
 
 
 def print_single_summary(summary: dict):
-    """Print summary for one target."""
     print("\n" + "=" * 80)
     print(f"BO SUMMARY - {summary['label']}")
     print("=" * 80)
@@ -773,7 +738,6 @@ def print_single_summary(summary: dict):
 
 
 def print_final_multi_summary(summary_df: pd.DataFrame):
-    """Print final summary table for all targets."""
     print("\n" + "=" * 80)
     print("MULTI-TARGET BO SUMMARY")
     print("=" * 80)
@@ -799,7 +763,6 @@ def print_final_multi_summary(summary_df: pd.DataFrame):
 
     n_better = int(summary_df["bo_better_than_de"].sum())
     print(f"\nBO better than DE on {n_better}/{len(summary_df)} targets.")
-
     print(f"  BO evaluations per target: {N_INITIAL + N_ITER}")
     print(f"  Total true simulator evaluations: {(N_INITIAL + N_ITER) * len(summary_df)}")
 
@@ -808,7 +771,6 @@ def print_final_multi_summary(summary_df: pd.DataFrame):
 # Main execution modes
 # ---------------------------------------------------------------------
 def run_single_target_mode():
-    """Run BO only on the central target."""
     target_info = TARGETS[2]
 
     df, summary = run_bayesian_optimization_for_target(
@@ -823,7 +785,6 @@ def run_single_target_mode():
 
 
 def run_all_targets_mode():
-    """Run BO on all five official targets."""
     all_results = []
     summaries = []
 
@@ -843,8 +804,8 @@ def run_all_targets_mode():
     all_results_df = pd.concat(all_results, ignore_index=True)
     summary_df = pd.DataFrame(summaries)
 
-    all_results_path = PROJECT_ROOT / "results" / "bo_results_all_targets.csv"
-    summary_path = PROJECT_ROOT / "results" / "bo_summary_all_targets.csv"
+    all_results_path = RESULTS_BO_DIR / "bo_results_all_targets.csv"
+    summary_path = RESULTS_BO_DIR / "bo_summary_all_targets.csv"
 
     all_results_df.to_csv(all_results_path, index=False)
     summary_df.to_csv(summary_path, index=False)
@@ -884,6 +845,8 @@ def print_header():
     print(f"  Candidates/iteration: {N_CANDIDATES}")
     print(f"  Kappa:                {KAPPA}")
     print(f"  Random state:         {RANDOM_STATE}")
+    print(f"  Results directory:    {RESULTS_BO_DIR}")
+    print(f"  Figures directory:    {FIGURES_BO_DIR}")
 
 
 def main():

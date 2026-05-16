@@ -1,0 +1,3 @@
+dataset,samples,peak_y_mean_m,peak_y_max_m,feasible_samples,feasible_extra_reach,feasible_high_outreach,max_feasible_peak_y_m,max_feasible_extra_reach_m,violation_rate_percent
+Original,1000,0.5110170100208944,0.8251511618565655,577,126,4,0.6617515206748259,0.1617515206748259,42.3
+Augmented,1600,0.5719317333972611,0.9608664404515932,803,352,168,0.8405863538914748,0.3405863538914748,49.8125

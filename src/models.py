@@ -1,19 +1,26 @@
 """
 models.py
 =========
-Gaussian Process Regression per predire peak outreach.
+Gaussian Process Regression surrogate model for predicting peak outreach.
 
 Workflow:
-1. Carica dataset
-2. Train/test split (80/20)
-3. Standardizzazione (X e y)
-4. Training GP con kernel Matern
-5. Metriche: RMSE, MAE, R²
-6. ARD: importanza parametri
-7. Plot: parity, residui, uncertainty
+1. Load simulation dataset
+2. Train/test split
+3. Standardize input and output variables
+4. Train a Gaussian Process Regressor
+5. Evaluate performance using RMSE, MAE and R²
+6. Analyze parameter relevance using ARD length-scales
+7. Generate diagnostic plots
+8. Save model, scalers, metrics and ARD results
 
-Author: [Il tuo nome]
-Date: 2025
+Main supervised-learning task:
+    [Kb, Kr, Mb, hb, hr, f0, f1, A, x_r_start] -> peak_y
+
+The GP is used later as a fast surrogate model inside the inverse
+optimization pipeline.
+
+Author: MatteoCasazza
+Date: 2026
 """
 
 import numpy as np
@@ -33,8 +40,26 @@ from sklearn.gaussian_process.kernels import (
 )
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
-# Import dataset utilities
-from dataset import load_dataset, ParameterRanges
+from dataset import load_dataset, load_dataset_dataframe, ParameterRanges
+
+
+# ============================================================================
+# PROJECT PATHS
+# ============================================================================
+
+# This makes paths independent from the current working directory.
+# The file is in src/, therefore parents[1] is the project root.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+DATA_DIR = PROJECT_ROOT / "data"
+RESULTS_DIR = PROJECT_ROOT / "results"
+FIGURES_DIR = PROJECT_ROOT / "figures"
+
+GP_RESULTS_DIR = RESULTS_DIR / "gp"
+GP_FIGURES_DIR = FIGURES_DIR / "gp"
+
+for directory in [GP_RESULTS_DIR, GP_FIGURES_DIR]:
+    directory.mkdir(parents=True, exist_ok=True)
 
 
 # ============================================================================
@@ -46,81 +71,151 @@ def prepare_data(
     y: np.ndarray,
     test_size: float = 0.2,
     random_state: int = 42
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, 
-           StandardScaler, StandardScaler]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray,
+           StandardScaler, StandardScaler, np.ndarray, np.ndarray]:
     """
-    Prepara dati per training GP: split + standardizzazione.
-    
-    Parameters
-    ----------
-    X : array (n, 9)
-        Parametri input
-    y : array (n,)
-        Peak outreach
+    Prepare data for GP training: train/test split and standardization.
+
+    Inputs
+    ------
+    X : ndarray, shape (n_samples, 9)
+        Input parameter matrix.
+    y : ndarray, shape (n_samples,)
+        Target vector, corresponding to peak_y.
     test_size : float
-        Frazione test set
+        Fraction of samples used for testing.
     random_state : int
-        Random seed
-    
-    Returns
+        Random seed for reproducibility.
+
+    Outputs
     -------
-    X_train_scaled : array (n_train, 9)
-    X_test_scaled : array (n_test, 9)
-    y_train_scaled : array (n_train,)
-    y_test_scaled : array (n_test,)
+    X_train_scaled : ndarray
+        Standardized training inputs.
+    X_test_scaled : ndarray
+        Standardized test inputs.
+    y_train_scaled : ndarray
+        Standardized training outputs.
+    y_test_scaled : ndarray
+        Standardized test outputs.
     scaler_X : StandardScaler
+        Scaler fitted on X_train.
     scaler_y : StandardScaler
-    
+        Scaler fitted on y_train.
+    y_train : ndarray
+        Original, unscaled training targets.
+    y_test : ndarray
+        Original, unscaled test targets.
+
     Notes
     -----
-    IMPORTANTE: Standardizzazione è OBBLIGATORIA per GP!
-    - Migliora convergenza ottimizzatore
-    - Rende kernel isotropico interpretabile
-    - Evita problemi numerici con length-scale
+    Standardization is essential for Gaussian Processes because:
+    - it improves numerical conditioning;
+    - it makes length-scales comparable across dimensions;
+    - it helps the optimizer converge more reliably.
     """
-    print("\n" + "="*70)
+    print("\n" + "=" * 70)
     print("PREPROCESSING DATASET")
-    print("="*70)
-    
-    # 1. Train/test split
+    print("=" * 70)
+
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y,
+        X,
+        y,
         test_size=test_size,
         random_state=random_state,
         shuffle=True
     )
-    
-    print(f"Train set: {len(y_train)} campioni ({100*(1-test_size):.0f}%)")
-    print(f"Test set:  {len(y_test)} campioni ({100*test_size:.0f}%)")
-    
-    # 2. Standardizzazione X
+
+    print(f"Train set: {len(y_train)} samples ({100 * (1 - test_size):.0f}%)")
+    print(f"Test set:  {len(y_test)} samples ({100 * test_size:.0f}%)")
+
     scaler_X = StandardScaler()
     X_train_scaled = scaler_X.fit_transform(X_train)
     X_test_scaled = scaler_X.transform(X_test)
-    
-    print(f"\nStandardizzazione X:")
-    print(f"  Mean X_train: {X_train_scaled.mean(axis=0)[:3]} ... (primi 3)")
-    print(f"  Std X_train:  {X_train_scaled.std(axis=0)[:3]} ...")
-    
-    # 3. Standardizzazione y
+
+    print("\nInput standardization:")
+    print(f"  Mean X_train, first 3 features: {X_train_scaled.mean(axis=0)[:3]}")
+    print(f"  Std  X_train, first 3 features: {X_train_scaled.std(axis=0)[:3]}")
+
     scaler_y = StandardScaler()
     y_train_scaled = scaler_y.fit_transform(y_train.reshape(-1, 1)).ravel()
     y_test_scaled = scaler_y.transform(y_test.reshape(-1, 1)).ravel()
-    
-    print(f"\nStandardizzazione y:")
+
+    print("\nOutput standardization:")
     print(f"  Mean y_train: {y_train_scaled.mean():.6f}")
-    print(f"  Std y_train:  {y_train_scaled.std():.6f}")
-    
-    # 4. Verifica
-    assert np.abs(X_train_scaled.mean()) < 1e-10, "X_train non centrato!"
-    assert np.abs(X_train_scaled.std() - 1.0) < 0.1, "X_train non normalizzato!"
-    assert np.abs(y_train_scaled.mean()) < 1e-10, "y_train non centrato!"
-    
-    print("\n✓ Preprocessing completato")
-    
-    return (X_train_scaled, X_test_scaled, 
-            y_train_scaled, y_test_scaled,
-            scaler_X, scaler_y)
+    print(f"  Std  y_train: {y_train_scaled.std():.6f}")
+
+    # More robust checks: per-feature mean and std.
+    assert np.allclose(X_train_scaled.mean(axis=0), 0.0, atol=1e-10), \
+        "X_train is not centered feature-wise."
+    assert np.allclose(X_train_scaled.std(axis=0), 1.0, atol=1e-10), \
+        "X_train is not normalized feature-wise."
+    assert np.allclose(y_train_scaled.mean(), 0.0, atol=1e-10), \
+        "y_train is not centered."
+    assert np.allclose(y_train_scaled.std(), 1.0, atol=1e-10), \
+        "y_train is not normalized."
+
+    print("\n✓ Preprocessing completed")
+
+    return (
+        X_train_scaled,
+        X_test_scaled,
+        y_train_scaled,
+        y_test_scaled,
+        scaler_X,
+        scaler_y,
+        y_train,
+        y_test
+    )
+
+
+def print_dataset_feasibility_summary(
+    filepath: str | Path = DATA_DIR / 'dataset_augmented.csv',
+    x_r_max: float = 0.5,
+    tolerance: float = 0.002
+) -> None:
+    """
+    Print feasibility statistics if the dataset contains physical metrics.
+
+    Inputs
+    ------
+    filepath : str
+        Dataset CSV path.
+    x_r_max : float
+        Nominal maximum robot relative position [m].
+    tolerance : float
+        Constraint tolerance [m].
+
+    Notes
+    -----
+    These statistics are not used for GP training.
+    They are printed only to document how many samples are physically feasible.
+    """
+    try:
+        df = load_dataset_dataframe(filepath)
+
+        required_cols = {'constraint_violation', 'extra_reach', 'peak_y'}
+        if not required_cols.issubset(df.columns):
+            print("\nDataset feasibility metrics not found. Skipping feasibility summary.")
+            return
+
+        feasible = df[df['constraint_violation'] <= tolerance]
+        good = feasible[feasible['extra_reach'] > 0.0]
+
+        print("\n" + "=" * 70)
+        print("DATASET FEASIBILITY SUMMARY")
+        print("=" * 70)
+        print(f"x_r_max:                    {x_r_max:.3f} m")
+        print(f"Constraint tolerance:        {tolerance:.4f} m")
+        print(f"Total samples:               {len(df)}")
+        print(f"Feasible samples:            {len(feasible)}")
+        print(f"Feasible extra-reach cases:  {len(good)}")
+        print(f"Max feasible peak_y:         {feasible['peak_y'].max():.6f} m")
+        print(f"Max feasible extra_reach:    {good['extra_reach'].max():.6f} m"
+              if len(good) > 0 else "Max feasible extra_reach:    n/a")
+        print("=" * 70)
+
+    except Exception as e:
+        print(f"\nCould not compute feasibility summary: {e}")
 
 
 # ============================================================================
@@ -133,62 +228,55 @@ def create_gp_model(
     length_scale_init: Optional[np.ndarray] = None,
     length_scale_bounds: Tuple[float, float] = (1e-2, 1e3),
     noise_level: float = 1e-5,
+    alpha: float = 1e-6,
     n_restarts: int = 10
 ) -> GaussianProcessRegressor:
     """
-    Crea modello Gaussian Process con kernel configurabile.
-    
-    Parameters
-    ----------
+    Create a Gaussian Process Regressor with a configurable kernel.
+
+    Inputs
+    ------
     kernel_type : str
-        Tipo kernel: 'matern32', 'matern52', 'rbf'
+        Kernel type. Supported values:
+            'matern32', 'matern52', 'rbf'
     n_dims : int
-        Dimensionalità input
-    length_scale_init : array, optional
-        Valori iniziali length-scale (default: ones)
+        Input dimensionality.
+    length_scale_init : ndarray, optional
+        Initial ARD length-scales.
     length_scale_bounds : tuple
-        Bounds per ottimizzazione length-scale
+        Lower and upper bounds for length-scale optimization.
     noise_level : float
-        Livello rumore iniziale
+        Initial noise level for the WhiteKernel.
     n_restarts : int
-        Restart ottimizzatore (importante per GP!)
-    
-    Returns
-    -------
+        Number of optimizer restarts.
+
+    Output
+    ------
     gp : GaussianProcessRegressor
-        Modello non addestrato
-    
+        Untrained GP model.
+
     Notes
     -----
-    Kernel formula:
-        k(x, x') = σ² · Matern(x, x', ℓ, ν) + σ_noise² · δ(x, x')
-    
-    dove:
-        σ² = constant_value (signal variance)
-        ℓ = length_scale (per ogni dimensione, ARD)
-        ν = nu (smoothness: 1.5 per Matern32, 2.5 per Matern52)
-        σ_noise² = noise_level
-    
-    ARD (Automatic Relevance Determination):
-        - Ogni dimensione ha la sua length-scale
-        - Length-scale piccola → dimensione importante
-        - Length-scale grande → dimensione irrilevante
+    Kernel structure:
+        k(x, x') = sigma_f² * k_base(x, x') + sigma_n² * delta(x, x')
+
+    ARD is enabled because each input dimension has its own length-scale.
+    Smaller length-scale means higher relevance of that input variable.
     """
     if length_scale_init is None:
         length_scale_init = np.ones(n_dims)
-    
-    # Kernel base
+
     if kernel_type == 'matern32':
         base_kernel = Matern(
             length_scale=length_scale_init,
             length_scale_bounds=length_scale_bounds,
-            nu=1.5  # C¹ continuity
+            nu=1.5
         )
     elif kernel_type == 'matern52':
         base_kernel = Matern(
             length_scale=length_scale_init,
             length_scale_bounds=length_scale_bounds,
-            nu=2.5  # C² continuity (smoother)
+            nu=2.5
         )
     elif kernel_type == 'rbf':
         from sklearn.gaussian_process.kernels import RBF
@@ -197,27 +285,27 @@ def create_gp_model(
             length_scale_bounds=length_scale_bounds
         )
     else:
-        raise ValueError(f"Kernel sconosciuto: {kernel_type}")
-    
-    # Kernel completo: ConstantKernel * BaseKernel + WhiteKernel
+        raise ValueError(f"Unknown kernel type: {kernel_type}")
+
     kernel = (
-        C(1.0, constant_value_bounds=(1e-3, 1e3)) * base_kernel +
-        WhiteKernel(noise_level=noise_level, noise_level_bounds=(1e-10, 1e-1))
+        C(1.0, constant_value_bounds=(1e-3, 1e3))
+        * base_kernel
+        + WhiteKernel(noise_level=noise_level, noise_level_bounds=(1e-10, 1e-1))
     )
-    
-    # Crea GP
+
     gp = GaussianProcessRegressor(
         kernel=kernel,
         n_restarts_optimizer=n_restarts,
-        normalize_y=False,  # Già normalizzato esternamente
+        normalize_y=False,
         random_state=42,
-        alpha=1e-10  # Regularizzazione numerica
+        alpha=alpha
     )
-    
-    print(f"\n✓ Creato GP con kernel: {kernel_type.upper()}")
+
+    print(f"\n✓ Created GP with kernel: {kernel_type.upper()}")
     print(f"  Kernel formula: {kernel}")
-    print(f"  N. restart ottimizzatore: {n_restarts}")
-    
+    print(f"  Optimizer restarts: {n_restarts}")
+    print(f"  Alpha regularization: {alpha}")
+
     return gp
 
 
@@ -226,64 +314,62 @@ def train_gp(
     y_train: np.ndarray,
     kernel_type: str = 'matern52',
     n_restarts: int = 10,
+    alpha: float = 1e-6,
     verbose: bool = True
 ) -> GaussianProcessRegressor:
     """
-    Addestra Gaussian Process.
-    
-    Parameters
-    ----------
-    X_train : array (n, 9)
-        Training input (GIÀ standardizzato!)
-    y_train : array (n,)
-        Training output (GIÀ standardizzato!)
+    Train a Gaussian Process Regressor.
+
+    Inputs
+    ------
+    X_train : ndarray
+        Standardized training inputs.
+    y_train : ndarray
+        Standardized training targets.
     kernel_type : str
-        Tipo kernel
+        Kernel type.
     n_restarts : int
-        Restart ottimizzatore
+        Number of optimizer restarts.
     verbose : bool
-        Stampa dettagli
-    
-    Returns
-    -------
+        If True, print optimized kernel details.
+
+    Output
+    ------
     gp : GaussianProcessRegressor
-        Modello addestrato
+        Trained GP model.
     """
-    print("\n" + "="*70)
+    print("\n" + "=" * 70)
     print("TRAINING GAUSSIAN PROCESS")
-    print("="*70)
-    
-    # Crea modello
+    print("=" * 70)
+
     gp = create_gp_model(
         kernel_type=kernel_type,
         n_dims=X_train.shape[1],
-        n_restarts=n_restarts
+        n_restarts=n_restarts,
+        alpha=alpha
     )
-    
-    # Training
-    print("\nFitting GP (questo può richiedere 10-60s)...")
+
+    print("\nFitting GP. This may take some time for 1000 samples...")
     start_time = time.time()
-    
+
     gp.fit(X_train, y_train)
-    
+
     elapsed = time.time() - start_time
-    print(f"✓ Training completato in {elapsed:.1f} s")
-    
-    # Log-marginal-likelihood (bontà fit)
+    print(f"✓ Training completed in {elapsed:.1f} s")
+
     lml = gp.log_marginal_likelihood(gp.kernel_.theta)
     print(f"\nLog-Marginal-Likelihood: {lml:.3f}")
-    print(f"  (Più alto = migliore fit)")
-    
-    # Hyperparameters ottimizzati
+    print("  Higher values usually indicate a better model fit.")
+
     if verbose:
-        print(f"\nKernel ottimizzato:")
+        print("\nOptimized kernel:")
         print(f"  {gp.kernel_}")
-    
+
     return gp
 
 
 # ============================================================================
-# METRICHE
+# EVALUATION
 # ============================================================================
 
 def evaluate_model(
@@ -295,116 +381,94 @@ def evaluate_model(
     scaler_y: StandardScaler
 ) -> Dict[str, float]:
     """
-    Valuta performance GP su train e test set.
-    
-    Parameters
-    ----------
+    Evaluate the trained GP on training and test sets.
+
+    Inputs
+    ------
     gp : GaussianProcessRegressor
-        Modello addestrato
-    X_train_scaled : array
-        Training input (scaled)
-    y_train_scaled : array
-        Training output (scaled)
-    X_test_scaled : array
-        Test input (scaled)
-    y_test_scaled : array
-        Test output (scaled)
+        Trained model.
+    X_train_scaled : ndarray
+        Standardized training inputs.
+    y_train_scaled : ndarray
+        Standardized training outputs.
+    X_test_scaled : ndarray
+        Standardized test inputs.
+    y_test_scaled : ndarray
+        Standardized test outputs.
     scaler_y : StandardScaler
-        Per de-normalizzare predizioni
-    
-    Returns
-    -------
+        Output scaler used to convert predictions back to meters.
+
+    Output
+    ------
     metrics : dict
-        {
-            'train_rmse', 'train_mae', 'train_r2',
-            'test_rmse', 'test_mae', 'test_r2',
-            'train_rmse_scaled', 'test_rmse_scaled',
-            'y_train_pred', 'y_test_pred',
-            'y_train_std', 'y_test_std'
-        }
-    
-    Notes
-    -----
-    IMPORTANTE: Predizioni vengono de-normalizzate per calcolare
-    metriche in unità fisiche (metri).
+        Performance metrics and prediction arrays.
     """
-    print("\n" + "="*70)
-    print("VALUTAZIONE MODELLO")
-    print("="*70)
-    
-    # Predizioni (scaled)
+    print("\n" + "=" * 70)
+    print("MODEL EVALUATION")
+    print("=" * 70)
+
     y_train_pred_scaled, y_train_std_scaled = gp.predict(
         X_train_scaled, return_std=True
     )
     y_test_pred_scaled, y_test_std_scaled = gp.predict(
         X_test_scaled, return_std=True
     )
-    
-    # De-normalizza
+
     y_train_pred = scaler_y.inverse_transform(
         y_train_pred_scaled.reshape(-1, 1)
     ).ravel()
     y_test_pred = scaler_y.inverse_transform(
         y_test_pred_scaled.reshape(-1, 1)
     ).ravel()
-    
+
     y_train_true = scaler_y.inverse_transform(
         y_train_scaled.reshape(-1, 1)
     ).ravel()
     y_test_true = scaler_y.inverse_transform(
         y_test_scaled.reshape(-1, 1)
     ).ravel()
-    
-    # De-normalizza std (scala con std di y)
+
     y_train_std = y_train_std_scaled * scaler_y.scale_[0]
     y_test_std = y_test_std_scaled * scaler_y.scale_[0]
-    
-    # Metriche TRAIN
+
     train_rmse = np.sqrt(mean_squared_error(y_train_true, y_train_pred))
     train_mae = mean_absolute_error(y_train_true, y_train_pred)
     train_r2 = r2_score(y_train_true, y_train_pred)
-    
-    # Metriche TEST
+
     test_rmse = np.sqrt(mean_squared_error(y_test_true, y_test_pred))
     test_mae = mean_absolute_error(y_test_true, y_test_pred)
     test_r2 = r2_score(y_test_true, y_test_pred)
-    
-    # Metriche scaled (per confronto)
+
     train_rmse_scaled = np.sqrt(mean_squared_error(
         y_train_scaled, y_train_pred_scaled
     ))
     test_rmse_scaled = np.sqrt(mean_squared_error(
         y_test_scaled, y_test_pred_scaled
     ))
-    
-    # Stampa
+
     print("\n--- TRAINING SET ---")
-    print(f"  RMSE:  {train_rmse:.6f} m  (scaled: {train_rmse_scaled:.6f})")
-    print(f"  MAE:   {train_mae:.6f} m")
+    print(f"  RMSE:  {train_rmse:.6f} m  ({train_rmse * 1000:.2f} mm)")
+    print(f"  MAE:   {train_mae:.6f} m  ({train_mae * 1000:.2f} mm)")
     print(f"  R²:    {train_r2:.6f}")
-    
+
     print("\n--- TEST SET ---")
-    print(f"  RMSE:  {test_rmse:.6f} m  (scaled: {test_rmse_scaled:.6f})")
-    print(f"  MAE:   {test_mae:.6f} m")
+    print(f"  RMSE:  {test_rmse:.6f} m  ({test_rmse * 1000:.2f} mm)")
+    print(f"  MAE:   {test_mae:.6f} m  ({test_mae * 1000:.2f} mm)")
     print(f"  R²:    {test_r2:.6f}")
-    
-    print("\n--- UNCERTAINTY (Test Set) ---")
+
+    print("\n--- PREDICTIVE UNCERTAINTY, TEST SET ---")
     print(f"  Mean std: {y_test_std.mean():.6f} m")
     print(f"  Max std:  {y_test_std.max():.6f} m")
-    
-    # Interpretazione
+
     if test_r2 > 0.95:
-        print("\n✓ Eccellente! R² > 0.95")
+        print("\n✓ Excellent surrogate accuracy: R² > 0.95")
     elif test_r2 > 0.85:
-        print("\n✓ Molto buono! R² > 0.85")
+        print("\n✓ Good surrogate accuracy: R² > 0.85")
     elif test_r2 > 0.70:
-        print("\n⚠️  Accettabile, ma si può migliorare (R² < 0.85)")
+        print("\n⚠️  Acceptable accuracy, but the model can be improved.")
     else:
-        print("\n⚠️  Attenzione: R² < 0.70, considera:")
-        print("     - Aumentare n_samples")
-        print("     - Provare kernel diverso")
-        print("     - Verificare range parametri")
-    
+        print("\n⚠️  Low accuracy. Consider increasing samples or changing kernel.")
+
     return {
         'train_rmse': train_rmse,
         'train_mae': train_mae,
@@ -417,102 +481,204 @@ def evaluate_model(
         'y_train_pred': y_train_pred,
         'y_test_pred': y_test_pred,
         'y_train_std': y_train_std,
-        'y_test_std': y_test_std
+        'y_test_std': y_test_std,
+        'y_train_true': y_train_true,
+        'y_test_true': y_test_true
     }
 
+def analyze_test_outliers(
+    X_test_scaled: np.ndarray,
+    y_test_true: np.ndarray,
+    y_test_pred: np.ndarray,
+    y_test_std: np.ndarray,
+    scaler_X: StandardScaler,
+    save_dir: str | Path = GP_RESULTS_DIR,
+    top_n: int = 10
+) -> pd.DataFrame:
+    """
+    Analyze the largest prediction errors on the test set.
+
+    Inputs
+    ------
+    X_test_scaled : ndarray
+        Standardized test inputs.
+    y_test_true : ndarray
+        True test target values in physical units [m].
+    y_test_pred : ndarray
+        Predicted test target values in physical units [m].
+    y_test_std : ndarray
+        Predictive standard deviation in physical units [m].
+    scaler_X : StandardScaler
+        Input scaler used to recover original parameter values.
+    save_dir : str
+        Directory where the error table is saved.
+    top_n : int
+        Number of largest errors printed.
+
+    Output
+    ------
+    error_df : DataFrame
+        Test samples sorted by absolute prediction error.
+    """
+    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    param_names = ParameterRanges.get_param_names()
+    X_test_original = scaler_X.inverse_transform(X_test_scaled)
+
+    error = y_test_true - y_test_pred
+    abs_error = np.abs(error)
+
+    error_df = pd.DataFrame(X_test_original, columns=param_names)
+    error_df['y_true'] = y_test_true
+    error_df['y_pred'] = y_test_pred
+    error_df['error'] = error
+    error_df['abs_error'] = abs_error
+    error_df['std'] = y_test_std
+
+    error_df = error_df.sort_values('abs_error', ascending=False).reset_index(drop=True)
+
+    filepath = save_dir / 'test_prediction_errors.csv'
+    error_df.to_csv(filepath, index=False)
+
+    print("\n" + "=" * 70)
+    print("TEST OUTLIER ANALYSIS")
+    print("=" * 70)
+    print(f"Saved full error table to: {filepath}")
+
+    print(f"\nTop {top_n} largest absolute test errors:")
+    cols = [
+        'y_true', 'y_pred', 'error', 'abs_error', 'std',
+        'Kb', 'Kr', 'Mb', 'hb', 'hr', 'f0', 'f1', 'A', 'x_r_start'
+    ]
+    print(error_df[cols].head(top_n).to_string(index=False))
+
+    high_outreach = error_df[error_df['y_true'] > 0.60]
+    if len(high_outreach) > 0:
+        print("\nHigh-outreach region, y_true > 0.60:")
+        print(f"  Samples:    {len(high_outreach)}")
+        print(f"  Mean error: {high_outreach['error'].mean():.6f} m")
+        print(f"  RMSE:       {np.sqrt(np.mean(high_outreach['error']**2)):.6f} m")
+        print(f"  Max error:  {high_outreach['abs_error'].max():.6f} m")
+    else:
+        print("\nNo test samples with y_true > 0.60.")
+
+    return error_df
+
 
 # ============================================================================
-# ARD: AUTOMATIC RELEVANCE DETERMINATION
+# ARD ANALYSIS
 # ============================================================================
+
+def extract_length_scales(gp: GaussianProcessRegressor) -> np.ndarray:
+    """
+    Robustly extract ARD length-scales from the optimized GP kernel.
+
+    Output
+    ------
+    length_scales : ndarray
+        Optimized length-scale for each input dimension.
+    """
+    kernel = gp.kernel_
+
+    # Expected structure:
+    # (ConstantKernel * Matern/RBF) + WhiteKernel
+    try:
+        return np.asarray(kernel.k1.k2.length_scale, dtype=float)
+    except AttributeError:
+        pass
+
+    # Alternative possible structure:
+    try:
+        return np.asarray(kernel.k2.length_scale, dtype=float)
+    except AttributeError:
+        pass
+
+    raise RuntimeError(
+        "Could not extract length-scales from the GP kernel. "
+        "Check kernel structure."
+    )
+
 
 def analyze_ard_relevance(
     gp: GaussianProcessRegressor,
     param_names: Optional[list] = None
 ) -> pd.DataFrame:
     """
-    Analizza importanza parametri tramite ARD length-scales.
-    
-    Parameters
-    ----------
+    Analyze parameter relevance using ARD length-scales.
+
+    Inputs
+    ------
     gp : GaussianProcessRegressor
-        Modello addestrato con kernel ARD
+        Trained GP model with ARD kernel.
     param_names : list, optional
-        Nomi parametri (default: usa ParameterRanges)
-    
-    Returns
-    -------
+        Input parameter names.
+
+    Output
+    ------
     df : DataFrame
-        Colonne: ['Parameter', 'LengthScale', 'Relevance']
-        Ordinato per rilevanza decrescente
-    
+        Columns:
+            Parameter
+            LengthScale
+            Relevance
+
     Notes
     -----
-    Relevance formula:
-        r_i = (1 / ℓ_i) / Σ_j (1 / ℓ_j)
-    
-    Interpretazione:
-        - Relevance alta → parametro importante
-        - Relevance bassa → parametro poco influente
+    Relevance is computed as:
+        r_i = (1 / l_i) / sum_j(1 / l_j)
+
+    where l_i is the optimized length-scale of input dimension i.
     """
-    print("\n" + "="*70)
-    print("ARD: IMPORTANZA PARAMETRI")
-    print("="*70)
-    
+    print("\n" + "=" * 70)
+    print("ARD PARAMETER RELEVANCE")
+    print("=" * 70)
+
     if param_names is None:
         param_names = ParameterRanges.get_param_names()
-    
-    # Estrai length-scales dal kernel ottimizzato
-    kernel = gp.kernel_
-    
-    # Kernel è: ConstantKernel * Matern + WhiteKernel
-    # Length-scales sono in: kernel.k1.k2.length_scale
-    try:
-        length_scales = kernel.k1.k2.length_scale
-    except AttributeError:
-        # Fallback per struttura kernel diversa
-        print("⚠️  Struttura kernel non standard, provo alternative...")
-        # Prova altre posizioni comuni
-        try:
-            length_scales = kernel.k2.length_scale
-        except:
-            length_scales = gp.kernel_.theta[1:10]  # Estrazione diretta
-    
-    print(f"\nLength-scales estratti: {len(length_scales)}")
-    
-    # Calcola relevance
+
+    length_scales = extract_length_scales(gp)
+
+    if len(length_scales) != len(param_names):
+        raise ValueError(
+            f"Length-scale dimension mismatch: got {len(length_scales)}, "
+            f"expected {len(param_names)}."
+        )
+
     relevance_raw = 1.0 / length_scales
     relevance_normalized = relevance_raw / relevance_raw.sum()
-    
-    # Crea DataFrame
+
     df = pd.DataFrame({
         'Parameter': param_names,
         'LengthScale': length_scales,
         'Relevance': relevance_normalized
     })
-    
-    # Ordina per rilevanza
+
     df = df.sort_values('Relevance', ascending=False).reset_index(drop=True)
-    
-    # Stampa
-    print("\n" + "-"*70)
-    print(f"{'Rank':<6}{'Parameter':<15}{'Length-Scale':<18}{'Relevance':<15}")
-    print("-"*70)
+
+    print("\n" + "-" * 70)
+    print(f"{'Rank':<6}{'Parameter':<15}{'Length-scale':<18}{'Relevance':<15}")
+    print("-" * 70)
+
     for i, row in df.iterrows():
-        print(f"{i+1:<6}{row['Parameter']:<15}"
-              f"{row['LengthScale']:<18.6f}{row['Relevance']:<15.4f}")
-    print("-"*70)
-    
-    # Interpretazione top 3
-    print(f"\n✓ Top 3 parametri più influenti:")
+        print(
+            f"{i + 1:<6}{row['Parameter']:<15}"
+            f"{row['LengthScale']:<18.6f}{row['Relevance']:<15.4f}"
+        )
+
+    print("-" * 70)
+
+    print("\n✓ Top 3 most influential parameters:")
     for i in range(min(3, len(df))):
-        print(f"  {i+1}. {df.iloc[i]['Parameter']:12s} "
-              f"(relevance: {df.iloc[i]['Relevance']:.3f})")
-    
+        print(
+            f"  {i + 1}. {df.iloc[i]['Parameter']:12s} "
+            f"(relevance: {df.iloc[i]['Relevance']:.3f})"
+        )
+
     return df
 
 
 # ============================================================================
-# VISUALIZZAZIONI
+# VISUALIZATION
 # ============================================================================
 
 def plot_training_results(
@@ -523,101 +689,146 @@ def plot_training_results(
     y_test_pred: np.ndarray,
     y_test_std: np.ndarray,
     metrics: dict,
-    save_dir: str = 'figures'
+    save_dir: str | Path = GP_FIGURES_DIR
 ) -> None:
     """
-    Plot completi risultati training GP.
-    
-    Generates
-    ---------
-    - gp_parity_plot.png: y_true vs y_pred
-    - gp_residuals.png: residui
-    - gp_uncertainty.png: predizioni con bande incertezza
+    Generate GP diagnostic plots.
+
+    Generated figures
+    -----------------
+    - gp_parity_plot.png
+    - gp_residuals.png
+    - gp_uncertainty.png
     """
-    Path(save_dir).mkdir(parents=True, exist_ok=True)
-    
-    # ========== PLOT 1: Parity Plot ==========
+    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    # Plot 1: parity plot
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 7))
-    
-    # Train
-    ax1.scatter(y_train_true, y_train_pred, alpha=0.6, s=50, 
-                edgecolors='black', linewidth=0.5, label='Train')
-    ax1.plot([y_train_true.min(), y_train_true.max()],
-             [y_train_true.min(), y_train_true.max()],
-             'r--', linewidth=2, label='Identità')
+
+    ax1.scatter(
+        y_train_true,
+        y_train_pred,
+        alpha=0.6,
+        s=50,
+        edgecolors='black',
+        linewidth=0.5,
+        label='Train'
+    )
+    ax1.plot(
+        [y_train_true.min(), y_train_true.max()],
+        [y_train_true.min(), y_train_true.max()],
+        'r--',
+        linewidth=2,
+        label='Identity'
+    )
     ax1.set_xlabel('True Peak Outreach [m]', fontsize=12)
     ax1.set_ylabel('Predicted Peak Outreach [m]', fontsize=12)
-    ax1.set_title(f'Training Set (R² = {metrics["train_r2"]:.4f})', 
-                  fontsize=13, fontweight='bold')
+    ax1.set_title(
+        f'Training Set (R² = {metrics["train_r2"]:.4f})',
+        fontsize=13,
+        fontweight='bold'
+    )
     ax1.legend(fontsize=11)
     ax1.grid(True, alpha=0.3)
-    
-    # Test
-    ax2.scatter(y_test_true, y_test_pred, alpha=0.6, s=50, 
-                c='orange', edgecolors='black', linewidth=0.5, label='Test')
-    ax2.plot([y_test_true.min(), y_test_true.max()],
-             [y_test_true.min(), y_test_true.max()],
-             'r--', linewidth=2, label='Identità')
+
+    ax2.scatter(
+        y_test_true,
+        y_test_pred,
+        alpha=0.6,
+        s=50,
+        c='orange',
+        edgecolors='black',
+        linewidth=0.5,
+        label='Test'
+    )
+    ax2.plot(
+        [y_test_true.min(), y_test_true.max()],
+        [y_test_true.min(), y_test_true.max()],
+        'r--',
+        linewidth=2,
+        label='Identity'
+    )
     ax2.set_xlabel('True Peak Outreach [m]', fontsize=12)
     ax2.set_ylabel('Predicted Peak Outreach [m]', fontsize=12)
-    ax2.set_title(f'Test Set (R² = {metrics["test_r2"]:.4f})', 
-                  fontsize=13, fontweight='bold')
+    ax2.set_title(
+        f'Test Set (R² = {metrics["test_r2"]:.4f})',
+        fontsize=13,
+        fontweight='bold'
+    )
     ax2.legend(fontsize=11)
     ax2.grid(True, alpha=0.3)
-    
-    plt.suptitle('Parity Plot: GP Performance', 
+
+    plt.suptitle('Parity Plot: GP Surrogate Performance',
                  fontsize=16, fontweight='bold', y=1.00)
     plt.tight_layout()
-    filepath = f'{save_dir}/gp_parity_plot.png'
+
+    filepath = save_dir / 'gp_parity_plot.png'
     plt.savefig(filepath, dpi=300, bbox_inches='tight')
-    print(f"✓ Salvato: {filepath}")
+    print(f"✓ Saved: {filepath}")
     plt.close()
-    
-    # ========== PLOT 2: Residuals ==========
+
+    # Plot 2: residuals
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 7))
-    
+
     residuals_train = y_train_true - y_train_pred
     residuals_test = y_test_true - y_test_pred
-    
-    # Train residuals
-    ax1.scatter(y_train_pred, residuals_train, alpha=0.6, s=50,
-                edgecolors='black', linewidth=0.5)
+
+    ax1.scatter(
+        y_train_pred,
+        residuals_train,
+        alpha=0.6,
+        s=50,
+        edgecolors='black',
+        linewidth=0.5
+    )
     ax1.axhline(0, color='red', linestyle='--', linewidth=2)
     ax1.set_xlabel('Predicted Peak Outreach [m]', fontsize=12)
     ax1.set_ylabel('Residuals [m]', fontsize=12)
-    ax1.set_title(f'Training Residuals (RMSE = {metrics["train_rmse"]:.6f} m)',
-                  fontsize=13, fontweight='bold')
+    ax1.set_title(
+        f'Training Residuals (RMSE = {metrics["train_rmse"]:.6f} m)',
+        fontsize=13,
+        fontweight='bold'
+    )
     ax1.grid(True, alpha=0.3)
-    
-    # Test residuals
-    ax2.scatter(y_test_pred, residuals_test, alpha=0.6, s=50, c='orange',
-                edgecolors='black', linewidth=0.5)
+
+    ax2.scatter(
+        y_test_pred,
+        residuals_test,
+        alpha=0.6,
+        s=50,
+        c='orange',
+        edgecolors='black',
+        linewidth=0.5
+    )
     ax2.axhline(0, color='red', linestyle='--', linewidth=2)
     ax2.set_xlabel('Predicted Peak Outreach [m]', fontsize=12)
     ax2.set_ylabel('Residuals [m]', fontsize=12)
-    ax2.set_title(f'Test Residuals (RMSE = {metrics["test_rmse"]:.6f} m)',
-                  fontsize=13, fontweight='bold')
+    ax2.set_title(
+        f'Test Residuals (RMSE = {metrics["test_rmse"]:.6f} m)',
+        fontsize=13,
+        fontweight='bold'
+    )
     ax2.grid(True, alpha=0.3)
-    
+
     plt.suptitle('Residual Analysis', fontsize=16, fontweight='bold', y=1.00)
     plt.tight_layout()
-    filepath = f'{save_dir}/gp_residuals.png'
+
+    filepath = save_dir / 'gp_residuals.png'
     plt.savefig(filepath, dpi=300, bbox_inches='tight')
-    print(f"✓ Salvato: {filepath}")
+    print(f"✓ Saved: {filepath}")
     plt.close()
-    
-    # ========== PLOT 3: Uncertainty ==========
+
+    # Plot 3: predictive uncertainty
     fig, ax = plt.subplots(figsize=(14, 8))
-    
-    # Ordina per true value
+
     idx_sorted = np.argsort(y_test_true)
     y_true_sorted = y_test_true[idx_sorted]
     y_pred_sorted = y_test_pred[idx_sorted]
     y_std_sorted = y_test_std[idx_sorted]
-    
+
     x = np.arange(len(y_test_true))
-    
-    # Plot
+
     ax.plot(x, y_true_sorted, 'k-', linewidth=2, label='True', alpha=0.8)
     ax.plot(x, y_pred_sorted, 'b-', linewidth=2, label='Predicted')
     ax.fill_between(
@@ -626,36 +837,38 @@ def plot_training_results(
         y_pred_sorted + 1.96 * y_std_sorted,
         alpha=0.3,
         color='blue',
-        label='95% Confidence'
+        label='95% predictive interval'
     )
-    
+
     ax.set_xlabel('Test Sample (sorted by true value)', fontsize=12)
     ax.set_ylabel('Peak Outreach [m]', fontsize=12)
-    ax.set_title('GP Predictions with Uncertainty Quantification',
+    ax.set_title('GP Predictions with Predictive Uncertainty',
                  fontsize=14, fontweight='bold')
     ax.legend(fontsize=11)
     ax.grid(True, alpha=0.3)
-    
+
     plt.tight_layout()
-    filepath = f'{save_dir}/gp_uncertainty.png'
+
+    filepath = save_dir / 'gp_uncertainty.png'
     plt.savefig(filepath, dpi=300, bbox_inches='tight')
-    print(f"✓ Salvato: {filepath}")
+    print(f"✓ Saved: {filepath}")
     plt.close()
 
 
 def plot_ard_relevance(
     ard_df: pd.DataFrame,
-    save_dir: str = 'figures'
+    save_dir: str | Path = GP_FIGURES_DIR
 ) -> None:
     """
-    Bar plot importanza parametri (ARD).
+    Generate ARD parameter relevance bar plot.
     """
-    Path(save_dir).mkdir(parents=True, exist_ok=True)
-    
+    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+
     fig, ax = plt.subplots(figsize=(12, 7))
-    
+
     colors = plt.cm.viridis(np.linspace(0.3, 0.9, len(ard_df)))
-    
+
     bars = ax.bar(
         ard_df['Parameter'],
         ard_df['Relevance'],
@@ -663,12 +876,11 @@ def plot_ard_relevance(
         edgecolor='black',
         linewidth=1.5
     )
-    
-    # Aggiungi valori sopra le barre
+
     for bar in bars:
         height = bar.get_height()
         ax.text(
-            bar.get_x() + bar.get_width()/2.,
+            bar.get_x() + bar.get_width() / 2.0,
             height + 0.01,
             f'{height:.3f}',
             ha='center',
@@ -676,23 +888,24 @@ def plot_ard_relevance(
             fontsize=10,
             fontweight='bold'
         )
-    
+
     ax.set_ylabel('Normalized Relevance', fontsize=13, fontweight='bold')
     ax.set_title('ARD: Parameter Importance Ranking',
                  fontsize=15, fontweight='bold', pad=20)
     ax.set_ylim(0, ard_df['Relevance'].max() * 1.15)
     ax.grid(True, alpha=0.3, axis='y')
     plt.xticks(rotation=45, ha='right', fontsize=11)
-    
+
     plt.tight_layout()
-    filepath = f'{save_dir}/gp_ard_relevance.png'
+
+    filepath = save_dir / 'gp_ard_relevance.png'
     plt.savefig(filepath, dpi=300, bbox_inches='tight')
-    print(f"✓ Salvato: {filepath}")
+    print(f"✓ Saved: {filepath}")
     plt.close()
 
 
 # ============================================================================
-# SALVATAGGIO MODELLO
+# SAVE AND LOAD MODEL
 # ============================================================================
 
 def save_model(
@@ -701,123 +914,217 @@ def save_model(
     scaler_y: StandardScaler,
     metrics: dict,
     ard_df: pd.DataFrame,
-    save_dir: str = 'results'
+    kernel_type: str,
+    alpha: float,
+    save_dir: str | Path = GP_RESULTS_DIR
 ) -> None:
     """
-    Salva modello + scaler + metriche.
+    Save the trained model, scalers, metrics and ARD results.
+
+    Inputs
+    ------
+    gp : GaussianProcessRegressor
+        Trained GP model.
+    scaler_X : StandardScaler
+        Input scaler.
+    scaler_y : StandardScaler
+        Output scaler.
+    metrics : dict
+        Evaluation metrics.
+    ard_df : DataFrame
+        ARD relevance table.
+    kernel_type : str
+        Kernel used for training.
+    save_dir : str
+        Output directory.
     """
-    Path(save_dir).mkdir(parents=True, exist_ok=True)
-    
-    # Salva GP
-    joblib.dump(gp, f'{save_dir}/gp_model.pkl')
-    print(f"✓ GP salvato: {save_dir}/gp_model.pkl")
-    
-    # Salva scalers
-    joblib.dump(scaler_X, f'{save_dir}/scaler_X.pkl')
-    joblib.dump(scaler_y, f'{save_dir}/scaler_y.pkl')
-    print(f"✓ Scalers salvati: {save_dir}/scaler_*.pkl")
-    
-    # Salva metriche
-    metrics_clean = {k: v for k, v in metrics.items() 
-                     if not k.startswith('y_')}  # Rimuovi array grandi
+    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    joblib.dump(gp, save_dir / 'gp_model.pkl')
+    print(f"✓ GP saved: {save_dir / 'gp_model.pkl'}")
+
+    joblib.dump(scaler_X, save_dir / 'scaler_X.pkl')
+    joblib.dump(scaler_y, save_dir / 'scaler_y.pkl')
+    print(f"✓ Scalers saved in: {save_dir}")
+
+    metrics_clean = {
+        k: v for k, v in metrics.items()
+        if not isinstance(v, np.ndarray)
+    }
+
     pd.DataFrame([metrics_clean]).to_csv(
-        f'{save_dir}/metrics.csv', index=False
+        save_dir / 'metrics.csv',
+        index=False
     )
-    print(f"✓ Metriche salvate: {save_dir}/metrics.csv")
-    
-    # Salva ARD
-    ard_df.to_csv(f'{save_dir}/ard_relevance.csv', index=False)
-    print(f"✓ ARD salvato: {save_dir}/ard_relevance.csv")
+    print(f"✓ Metrics saved: {save_dir / 'metrics.csv'}")
+
+    ard_df.to_csv(save_dir / 'ard_relevance.csv', index=False)
+    print(f"✓ ARD saved: {save_dir / 'ard_relevance.csv'}")
+
+    with open(save_dir / 'model_info.txt', 'w') as f:
+        f.write("Gaussian Process Surrogate Model\n")
+        f.write("=" * 40 + "\n")
+        f.write(f"Kernel type: {kernel_type}\n")
+        f.write(f"Input parameters: {ParameterRanges.get_param_names()}\n")
+        f.write(f"Alpha: {alpha}\n")
+        f.write("Target: peak_y\n")
+        f.write("\nOptimized kernel:\n")
+        f.write(str(gp.kernel_) + "\n")
+        f.write("\nTest metrics:\n")
+        f.write(f"R2:   {metrics['test_r2']:.6f}\n")
+        f.write(f"RMSE: {metrics['test_rmse']:.6f} m\n")
+        f.write(f"MAE:  {metrics['test_mae']:.6f} m\n")
+
+    print(f"✓ Model info saved: {save_dir / 'model_info.txt'}")
 
 
-def load_model(save_dir: str = 'results') -> Tuple:
+def load_model(save_dir: str | Path = GP_RESULTS_DIR) -> Tuple:
     """
-    Carica modello + scalers.
+    Load the trained GP model and scalers.
+
+    Output
+    ------
+    gp : GaussianProcessRegressor
+    scaler_X : StandardScaler
+    scaler_y : StandardScaler
     """
-    gp = joblib.load(f'{save_dir}/gp_model.pkl')
-    scaler_X = joblib.load(f'{save_dir}/scaler_X.pkl')
-    scaler_y = joblib.load(f'{save_dir}/scaler_y.pkl')
-    
-    print(f"✓ Modello caricato da: {save_dir}/")
-    
+    save_dir = Path(save_dir)
+
+    gp = joblib.load(save_dir / 'gp_model.pkl')
+    scaler_X = joblib.load(save_dir / 'scaler_X.pkl')
+    scaler_y = joblib.load(save_dir / 'scaler_y.pkl')
+
+    print(f"✓ Model loaded from: {save_dir}")
+
     return gp, scaler_X, scaler_y
 
 
 # ============================================================================
-# MAIN: Pipeline completa training
+# MAIN TRAINING PIPELINE
 # ============================================================================
 
 if __name__ == "__main__":
-    print("\n" + "="*70)
+    print("\n" + "=" * 70)
     print("GAUSSIAN PROCESS REGRESSION - TRAINING PIPELINE")
-    print("="*70 + "\n")
-    
-    # ========== 1. Carica dataset ==========
-    X, y = load_dataset('data/dataset_outreach.csv')
-    
-    # ========== 2. Preprocessing ==========
-    (X_train_sc, X_test_sc, 
-     y_train_sc, y_test_sc,
-     scaler_X, scaler_y) = prepare_data(X, y, test_size=0.2, random_state=42)
-    
-    # ========== 3. Training GP ==========
-    gp = train_gp(
-        X_train_sc, 
+    print("=" * 70 + "\n")
+
+    DATASET_PATH = DATA_DIR / 'dataset_augmented.csv'
+    KERNEL_TYPE = 'matern52'
+    ALPHA = 1e-6
+
+    # Matern 5/2 is kept as the final kernel because it produced more stable
+    # inverse optimization results in previous experiments.
+    N_RESTARTS = 10
+
+    # 1. Load dataset
+    X, y = load_dataset(str(DATASET_PATH))
+
+    print_dataset_feasibility_summary(
+        filepath=str(DATASET_PATH),
+        x_r_max=0.5,
+        tolerance=0.002
+    )
+
+    # 2. Preprocessing
+    (
+        X_train_sc,
+        X_test_sc,
         y_train_sc,
-        kernel_type='matern52',  # final kernel for inverse optimization stability
-        n_restarts=10,
+        y_test_sc,
+        scaler_X,
+        scaler_y,
+        y_train,
+        y_test
+    ) = prepare_data(X, y, test_size=0.2, random_state=42)
+
+    # 3. GP training
+    gp = train_gp(
+        X_train_sc,
+        y_train_sc,
+        kernel_type=KERNEL_TYPE,
+        n_restarts=N_RESTARTS,
+        alpha=ALPHA,
         verbose=True
     )
-    
-    # ========== 4. Valutazione ==========
+
+    # 4. Evaluation
     metrics = evaluate_model(
-        gp, 
-        X_train_sc, y_train_sc,
-        X_test_sc, y_test_sc,
+        gp,
+        X_train_sc,
+        y_train_sc,
+        X_test_sc,
+        y_test_sc,
         scaler_y
     )
-    
-    # ========== 5. ARD Analysis ==========
+
+    # ========== Extra: test outlier analysis ==========
+    error_df = analyze_test_outliers(
+        X_test_scaled=X_test_sc,
+        y_test_true=metrics['y_test_true'],
+        y_test_pred=metrics['y_test_pred'],
+        y_test_std=metrics['y_test_std'],
+        scaler_X=scaler_X,
+        save_dir=GP_RESULTS_DIR,
+        top_n=10
+    )
+
+    # 5. ARD analysis
     ard_df = analyze_ard_relevance(gp)
-    
-    # ========== 6. Plot ==========
-    print("\nGenerazione plot...")
+
+    # 6. Plots
+    print("\nGenerating plots...")
     plot_training_results(
-        scaler_y.inverse_transform(y_train_sc.reshape(-1, 1)).ravel(),
+        metrics['y_train_true'],
         metrics['y_train_pred'],
         metrics['y_train_std'],
-        scaler_y.inverse_transform(y_test_sc.reshape(-1, 1)).ravel(),
+        metrics['y_test_true'],
         metrics['y_test_pred'],
         metrics['y_test_std'],
         metrics,
-        save_dir='figures'
+        save_dir=GP_FIGURES_DIR
     )
-    
-    plot_ard_relevance(ard_df, save_dir='figures')
-    
-    # ========== 7. Salvataggio ==========
-    save_model(gp, scaler_X, scaler_y, metrics, ard_df, save_dir='results')
-    
-    # ========== Summary ==========
-    print("\n" + "="*70)
-    print("TRAINING COMPLETATO!")
-    print("="*70)
-    print(f"\n📊 METRICHE FINALI:")
+
+    plot_ard_relevance(ard_df, save_dir=GP_FIGURES_DIR)
+
+    # 7. Save model
+    save_model(
+        gp,
+        scaler_X,
+        scaler_y,
+        metrics,
+        ard_df,
+        kernel_type=KERNEL_TYPE,
+        alpha=ALPHA,
+        save_dir=GP_RESULTS_DIR
+    )
+
+    # Final summary
+    print("\n" + "=" * 70)
+    print("TRAINING COMPLETED")
+    print("=" * 70)
+
+    print("\nFINAL METRICS:")
     print(f"  Test R²:   {metrics['test_r2']:.4f}")
-    print(f"  Test RMSE: {metrics['test_rmse']:.6f} m")
-    print(f"  Test MAE:  {metrics['test_mae']:.6f} m")
-    
-    print(f"\n🔍 TOP 3 PARAMETRI INFLUENTI:")
+    print(f"  Test RMSE: {metrics['test_rmse']:.6f} m "
+          f"({metrics['test_rmse'] * 1000:.2f} mm)")
+    print(f"  Test MAE:  {metrics['test_mae']:.6f} m "
+          f"({metrics['test_mae'] * 1000:.2f} mm)")
+
+    print("\nTOP 3 INFLUENTIAL PARAMETERS:")
     for i in range(3):
-        print(f"  {i+1}. {ard_df.iloc[i]['Parameter']:12s} "
-              f"(relevance: {ard_df.iloc[i]['Relevance']:.3f})")
-    
-    print(f"\n📁 OUTPUT:")
-    print(f"  Modello:   results/gp_model.pkl")
-    print(f"  Scalers:   results/scaler_*.pkl")
-    print(f"  Metriche:  results/metrics.csv")
-    print(f"  ARD:       results/ard_relevance.csv")
-    print(f"  Plot:      figures/gp_*.png")
-    
-    print("\n✅ Prossimo step: src/optimization.py (problema inverso)")
-    print("="*70 + "\n")
+        print(
+            f"  {i + 1}. {ard_df.iloc[i]['Parameter']:12s} "
+            f"(relevance: {ard_df.iloc[i]['Relevance']:.3f})"
+        )
+
+    print("\nOUTPUT:")
+    print(f"  Model:      {GP_RESULTS_DIR / 'gp_model.pkl'}")
+    print(f"  Scalers:    {GP_RESULTS_DIR / 'scaler_*.pkl'}")
+    print(f"  Metrics:    {GP_RESULTS_DIR / 'metrics.csv'}")
+    print(f"  ARD:        {GP_RESULTS_DIR / 'ard_relevance.csv'}")
+    print(f"  Model info: {GP_RESULTS_DIR / 'model_info.txt'}")
+    print(f"  Plots:      {GP_FIGURES_DIR / 'gp_*.png'}")
+
+    print("\nNext step: src/optimization.py")
+    print("=" * 70 + "\n")
