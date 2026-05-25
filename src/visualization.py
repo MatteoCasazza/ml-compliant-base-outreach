@@ -20,10 +20,10 @@ This script is designed to work with the final project pipeline:
 Expected input files
 --------------------
 - data/dataset_augmented.csv
-- results/gp_model.pkl
-- results/scaler_X.pkl
-- results/scaler_y.pkl
-- results/inverse_results.csv
+- results/gp/gp_model.pkl
+- results/gp/scaler_X.pkl
+- results/gp/scaler_y.pkl
+- results/inverse_optimization/inverse_results.csv
 
 Generated outputs
 -----------------
@@ -31,9 +31,9 @@ Generated outputs
 - figures/gp_surface_Kr_hr.png
 - figures/sensitivity_analysis.png
 - figures/monte_carlo_robustness.png
-- results/sensitivity_analysis.csv
-- results/monte_carlo_robustness.csv
-- results/monte_carlo_robustness_stats.csv
+- results/sensitivity/sensitivity_analysis.csv
+- results/robustness/monte_carlo_robustness.csv
+- results/robustness/monte_carlo_robustness_stats.csv
 
 Author: Matteo Casazza
 Date: 2026
@@ -58,12 +58,16 @@ from models import load_model
 # GLOBAL SETTINGS
 # ============================================================================
 
-DATASET_PATH = "data/dataset_augmented.csv"
-INVERSE_RESULTS_PATH = "results/inverse_results.csv"
-MODEL_DIR = "results"
+# Robust project-root paths.
+# This makes the script work even if it is launched from a different folder.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-RESULTS_DIR = "results"
-FIGURES_DIR = "figures"
+DATASET_PATH = PROJECT_ROOT / "data" / "dataset_augmented.csv"
+INVERSE_RESULTS_PATH = PROJECT_ROOT / "results" / "inverse_optimization" / "inverse_results.csv"
+MODEL_DIR = PROJECT_ROOT / "results" / "gp"
+
+RESULTS_DIR = PROJECT_ROOT / "results"
+FIGURES_DIR = PROJECT_ROOT / "figures"
 
 X_R_MAX = 0.5
 CONSTRAINT_TOLERANCE = 0.002
@@ -82,6 +86,31 @@ def ensure_output_dirs() -> None:
     """Create output folders if they do not exist."""
     Path(RESULTS_DIR).mkdir(parents=True, exist_ok=True)
     Path(FIGURES_DIR).mkdir(parents=True, exist_ok=True)
+
+    for subdir in [
+        "animation",
+        "augmentation",
+        "cross_validation",
+        "dataset",
+        "gp",
+        "inverse_optimization",
+        "mpc",
+        "robustness",
+        "sensitivity",
+    ]:
+        (Path(FIGURES_DIR) / subdir).mkdir(parents=True, exist_ok=True)
+
+    for subdir in [
+        "augmentation",
+        "cross_validation",
+        "dataset",
+        "gp",
+        "inverse_optimization",
+        "mpc",
+        "robustness",
+        "sensitivity",
+    ]:
+        (Path(RESULTS_DIR) / subdir).mkdir(parents=True, exist_ok=True)
 
 
 def load_final_inverse_results(filepath: str = INVERSE_RESULTS_PATH) -> pd.DataFrame:
@@ -1106,7 +1135,6 @@ def monte_carlo_robustness(
     ax.set_title("Constraint violation under perturbations")
     ax.grid(True, alpha=0.3, axis="y")
     ax.legend(fontsize=9)
-
     ax.text(
         0.97,
         0.92,
@@ -1175,9 +1203,9 @@ if __name__ == "__main__":
     print("\nLoading model and data...")
 
     gp, scaler_X, scaler_y = load_model(MODEL_DIR)
-    X_data, y_data = load_dataset(DATASET_PATH)
-    df_data = load_dataset_dataframe(DATASET_PATH)
-    inverse_results = load_final_inverse_results(INVERSE_RESULTS_PATH)
+    X_data, y_data = load_dataset(str(DATASET_PATH))
+    df_data = load_dataset_dataframe(str(DATASET_PATH))
+    inverse_results = load_final_inverse_results(str(INVERSE_RESULTS_PATH))
 
     print(f"Dataset loaded: {DATASET_PATH}")
     print(f"  Samples: {len(X_data)}")
@@ -1214,7 +1242,7 @@ if __name__ == "__main__":
     animate_optimized_response(
         params=optimal_params,
         y_target=y_target,
-        save_path=f"{FIGURES_DIR}/animation_target{selected_idx + 1}.gif",
+        save_path=str(FIGURES_DIR / "animation" / f"animation_target{selected_idx + 1}.gif"),
         T_sim=T_SIM,
         dt=DT,
         fps=30,
@@ -1251,7 +1279,7 @@ if __name__ == "__main__":
         y_param="hr",
         optimal_point=optimal_point,
         resolution=70,
-        save_path=f"{FIGURES_DIR}/gp_surface_Kr_hr.png",
+        save_path=str(FIGURES_DIR / "gp" / "gp_surface_Kr_hr.png"),
     )
 
     # ------------------------------------------------------------------------
@@ -1270,8 +1298,8 @@ if __name__ == "__main__":
         params_to_vary=["Mb", "hr", "f1", "A", "Kb", "Kr"],
         n_points=35,
         validate_points=5,
-        save_plot=f"{FIGURES_DIR}/sensitivity_analysis.png",
-        save_csv=f"{RESULTS_DIR}/sensitivity_analysis.csv",
+        save_plot=str(FIGURES_DIR / "sensitivity" / "sensitivity_analysis.png"),
+        save_csv=str(RESULTS_DIR / "sensitivity" / "sensitivity_analysis.csv"),
     )
 
     # ------------------------------------------------------------------------
@@ -1287,8 +1315,8 @@ if __name__ == "__main__":
         n_samples=100,
         noise_level=0.05,
         params_to_perturb=["Kb", "Mb", "hb"],
-        save_plot=f"{FIGURES_DIR}/monte_carlo_robustness.png",
-        save_csv=f"{RESULTS_DIR}/monte_carlo_robustness.csv",
+        save_plot=str(FIGURES_DIR / "robustness" / "monte_carlo_robustness.png"),
+        save_csv=str(RESULTS_DIR / "robustness" / "monte_carlo_robustness.csv"),
         seed=42,
     )
 
@@ -1304,9 +1332,9 @@ if __name__ == "__main__":
     print(f"  GP response surface:         {FIGURES_DIR}/gp_surface_Kr_hr.png")
     print(f"  Sensitivity analysis:        {FIGURES_DIR}/sensitivity_analysis.png")
     print(f"  Monte Carlo robustness:      {FIGURES_DIR}/monte_carlo_robustness.png")
-    print(f"  Sensitivity CSV:             {RESULTS_DIR}/sensitivity_analysis.csv")
-    print(f"  Monte Carlo CSV:             {RESULTS_DIR}/monte_carlo_robustness.csv")
-    print(f"  Monte Carlo statistics CSV:  {RESULTS_DIR}/monte_carlo_robustness_stats.csv")
+    print(f"  Sensitivity CSV:             {RESULTS_DIR / 'sensitivity' / 'sensitivity_analysis.csv'}")
+    print(f"  Monte Carlo CSV:             {RESULTS_DIR / 'robustness' / 'monte_carlo_robustness.csv'}")
+    print(f"  Monte Carlo statistics CSV:  {RESULTS_DIR / 'robustness' / 'monte_carlo_robustness_stats.csv'}")
 
     print("\nRecommended figures for the report/presentation:")
     print("  1. inverse_targets.png")
