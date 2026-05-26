@@ -1,0 +1,27 @@
+Gaussian Process Constraint Surrogate Model
+==================================================
+Target: max_xr
+Input parameters: ['Kb', 'Kr', 'Mb', 'hb', 'hr', 'f0', 'f1', 'A', 'x_r_start']
+Kernel type: matern52
+Alpha: 1e-06
+Optimizer restarts: 10
+Training time: 333.94 s
+
+Optimized kernel:
+19.1**2 * Matern(length_scale=[87.8, 15.9, 11.8, 219, 5.59, 1e+03, 4.1, 37.2, 204], nu=2.5) + WhiteKernel(noise_level=0.00328)
+
+Test regression metrics:
+R2:   0.988026
+RMSE: 0.006822 m (6.822 mm)
+MAE:  0.003333 m (3.333 mm)
+
+Constraint classification, true limit:
+Accuracy: 98.44%
+False feasible: 0.62%
+False infeasible: 0.94%
+
+Near-boundary metrics:
+Range: [0.480, 0.520] m
+Samples: 113
+RMSE: 4.425 mm
+False feasible: 0.88%

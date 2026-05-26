@@ -1,6 +1,0 @@
-rioridinare file
-salvari in github
-aggiustare model comparison (rain forest)
-aggiustare learning curve (serve?)
-aggiungere grafico tipo kernel comparison
-capire extra

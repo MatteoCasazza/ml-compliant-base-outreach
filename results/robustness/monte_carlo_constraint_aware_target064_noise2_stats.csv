@@ -1,0 +1,2 @@
+target,n_samples,noise_level,mean_y,std_y,min_y,max_y,q05_y,q95_y,mean_error,max_error,success_rate_10mm,feasibility_rate,mean_constraint_violation,max_constraint_violation
+0.64,100,0.02,0.6350142929675204,0.0047700822177053,0.619987182152222,0.647169572241122,0.6280322454864793,0.6426802283322441,0.0056249527691870525,0.020012817847777975,0.84,1.0,0.0,0.0

@@ -46,7 +46,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.optimize import differential_evolution
 
-from models import load_model
+from model_peak_y import load_model
 from dynamics import simulate_system
 
 
