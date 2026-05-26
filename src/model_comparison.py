@@ -1,497 +1,1108 @@
 """
 model_comparison.py
 ===================
-Confronto Gaussian Process vs Random Forest Regressor.
 
-Obiettivo:
-Dimostrare che, pur essendo RF competitivo, il GP è preferibile per:
-- Uncertainty quantification
-- ARD interpretability
-- Integrazione in inverse optimization
+Model comparison for the main GP_peak_y surrogate.
 
-Author: MatteoCasazza
+Goal
+----
+Compare the final Gaussian Process surrogate against a Random Forest baseline
+on the main prediction task:
+
+    [Kb, Kr, Mb, hb, hr, f0, f1, A, x_r_start] -> peak_y
+
+The comparison is used to justify the final choice of the Gaussian Process
+surrogate for inverse optimization.
+
+Why compare only peak_y?
+------------------------
+peak_y is the main performance output optimized in the inverse design problem.
+The auxiliary max_xr surrogate is used only for constraint guidance and is
+evaluated separately using constraint-specific metrics.
+
+Generated outputs
+-----------------
+results/model_comparison/
+    gp_vs_rf_metrics.csv
+    gp_vs_rf_predictions.csv
+    rf_feature_importance.csv
+    model_comparison_summary.txt
+
+figures/model_comparison/
+    gp_vs_rf_metrics.png
+    gp_vs_rf_parity.png
+    gp_vs_rf_residuals.png
+    rf_feature_importance.png
+    gp_vs_rf_error_distribution.png
+
+Author: Matteo Casazza
 Date: 2026
 """
 
+import time
+import warnings
+from pathlib import Path
+from typing import Dict, Tuple
+
+import joblib
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import seaborn as sns
-from pathlib import Path
-import time
-from typing import Dict, Tuple, Optional, List
 
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.model_selection import train_test_split
 
-# Import dataset utilities
-from dataset import load_dataset, ParameterRanges
+
+warnings.filterwarnings("ignore")
 
 
 # ============================================================================
-# TRAINING RANDOM FOREST
+# PATHS
+# ============================================================================
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+DATA_PATH = PROJECT_ROOT / "data" / "dataset_augmented.csv"
+
+GP_DIR = PROJECT_ROOT / "results" / "gp"
+GP_MODEL_PATH = GP_DIR / "gp_model.pkl"
+GP_SCALER_X_PATH = GP_DIR / "scaler_X.pkl"
+GP_SCALER_Y_PATH = GP_DIR / "scaler_y.pkl"
+
+RESULTS_DIR = PROJECT_ROOT / "results" / "model_comparison"
+FIGURES_DIR = PROJECT_ROOT / "figures" / "model_comparison"
+
+RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+FIGURES_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# ============================================================================
+# SETTINGS
+# ============================================================================
+
+PARAM_COLS = [
+    "Kb",
+    "Kr",
+    "Mb",
+    "hb",
+    "hr",
+    "f0",
+    "f1",
+    "A",
+    "x_r_start",
+]
+
+TARGET_COL = "peak_y"
+
+TEST_SIZE = 0.20
+RANDOM_STATE = 42
+
+HIGH_OUTREACH_THRESHOLD = 0.60
+
+RF_CONFIG = {
+    "n_estimators": 500,
+    "max_depth": None,
+    "min_samples_split": 2,
+    "min_samples_leaf": 1,
+    "max_features": 1.0,
+    "random_state": RANDOM_STATE,
+    "n_jobs": -1,
+}
+
+
+# ============================================================================
+# DATA
+# ============================================================================
+
+def load_dataset() -> Tuple[np.ndarray, np.ndarray, pd.DataFrame]:
+    """
+    Load the final augmented dataset.
+    """
+    if not DATA_PATH.exists():
+        raise FileNotFoundError(f"Dataset not found: {DATA_PATH}")
+
+    df = pd.read_csv(DATA_PATH)
+
+    required_cols = PARAM_COLS + [TARGET_COL]
+    missing_cols = [col for col in required_cols if col not in df.columns]
+
+    if missing_cols:
+        raise ValueError(f"Missing columns in dataset: {missing_cols}")
+
+    X = df[PARAM_COLS].values
+    y = df[TARGET_COL].values
+
+    return X, y, df
+
+
+def print_dataset_summary(df: pd.DataFrame) -> None:
+    """
+    Print dataset statistics.
+    """
+    print("\nDataset summary:")
+    print(f"  Samples:                  {len(df)}")
+    print(f"  Target:                   {TARGET_COL}")
+    print(f"  Mean peak_y:              {df[TARGET_COL].mean():.6f} m")
+    print(f"  Std peak_y:               {df[TARGET_COL].std():.6f} m")
+    print(f"  Min peak_y:               {df[TARGET_COL].min():.6f} m")
+    print(f"  Max peak_y:               {df[TARGET_COL].max():.6f} m")
+
+    high_count = int((df[TARGET_COL] > HIGH_OUTREACH_THRESHOLD).sum())
+    print(
+        f"  High-outreach samples:    {high_count} "
+        f"({100 * high_count / len(df):.1f}%)"
+    )
+
+    if "constraint_violation" in df.columns:
+        feasible_count = int((df["constraint_violation"] <= 0.0).sum())
+        print(
+            f"  Feasible samples:         {feasible_count} "
+            f"({100 * feasible_count / len(df):.1f}%)"
+        )
+
+
+# ============================================================================
+# GP LOADING AND PREDICTION
+# ============================================================================
+
+def load_final_gp():
+    """
+    Load the final trained GP_peak_y model and scalers.
+    """
+    missing_files = [
+        path for path in [GP_MODEL_PATH, GP_SCALER_X_PATH, GP_SCALER_Y_PATH]
+        if not path.exists()
+    ]
+
+    if missing_files:
+        raise FileNotFoundError(
+            "Missing GP files:\n" + "\n".join(str(p) for p in missing_files)
+        )
+
+    gp_model = joblib.load(GP_MODEL_PATH)
+    scaler_X = joblib.load(GP_SCALER_X_PATH)
+    scaler_y = joblib.load(GP_SCALER_Y_PATH)
+
+    return gp_model, scaler_X, scaler_y
+
+
+def predict_gp(
+    gp_model,
+    scaler_X,
+    scaler_y,
+    X: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, float]:
+    """
+    Predict peak_y using the final GP surrogate.
+
+    Returns
+    -------
+    y_pred : ndarray
+        Mean prediction in physical units.
+    y_std : ndarray
+        Predictive standard deviation in physical units.
+    prediction_time_s : float
+        Prediction time.
+    """
+    X_scaled = scaler_X.transform(X)
+
+    start_time = time.time()
+    y_pred_scaled, y_std_scaled = gp_model.predict(
+        X_scaled,
+        return_std=True,
+    )
+    prediction_time_s = time.time() - start_time
+
+    y_pred = scaler_y.inverse_transform(
+        y_pred_scaled.reshape(-1, 1)
+    ).ravel()
+
+    y_std = y_std_scaled * scaler_y.scale_[0]
+
+    return y_pred, y_std, prediction_time_s
+
+
+# ============================================================================
+# RANDOM FOREST
 # ============================================================================
 
 def train_random_forest(
     X_train: np.ndarray,
     y_train: np.ndarray,
-    n_estimators: int = 100,
-    max_depth: Optional[int] = None,
-    min_samples_split: int = 2,
-    random_state: int = 42,
-    verbose: bool = True
 ) -> Tuple[RandomForestRegressor, float]:
     """
-    Addestra Random Forest Regressor.
-    
-    Parameters
-    ----------
-    X_train : array (n, 9)
-        Training input (NO scaling per RF!)
-    y_train : array (n,)
-        Training output (NO scaling!)
-    n_estimators : int
-        Numero alberi
-    max_depth : int, optional
-        Profondità massima alberi
-    min_samples_split : int
-        Minimo campioni per split
-    random_state : int
-    verbose : bool
-    
-    Returns
-    -------
-    rf : RandomForestRegressor
-        Modello addestrato
-    training_time : float
-        Tempo training [s]
-    
-    Notes
-    -----
-    Random Forest NON richiede scaling di input/output.
-    È robusto e funziona bene con feature a scale diverse.
+    Train Random Forest baseline.
+
+    Random Forest does not require feature scaling.
     """
-    if verbose:
-        print("\n" + "="*70)
-        print("TRAINING RANDOM FOREST")
-        print("="*70)
-        print(f"N. estimators: {n_estimators}")
-        print(f"Max depth: {max_depth if max_depth else 'None (full trees)'}")
-        print(f"Min samples split: {min_samples_split}")
-    
-    # Crea modello
-    rf = RandomForestRegressor(
-        n_estimators=n_estimators,
-        max_depth=max_depth,
-        min_samples_split=min_samples_split,
-        random_state=random_state,
-        n_jobs=-1,  # Parallelizza
-        verbose=0
-    )
-    
-    # Training
-    print("\nFitting Random Forest...")
+    print("\n" + "=" * 80)
+    print("TRAINING RANDOM FOREST BASELINE")
+    print("=" * 80)
+    print(f"n_estimators:       {RF_CONFIG['n_estimators']}")
+    print(f"max_depth:          {RF_CONFIG['max_depth']}")
+    print(f"min_samples_split:  {RF_CONFIG['min_samples_split']}")
+    print(f"min_samples_leaf:   {RF_CONFIG['min_samples_leaf']}")
+    print(f"max_features:       {RF_CONFIG['max_features']}")
+
+    rf = RandomForestRegressor(**RF_CONFIG)
+
     start_time = time.time()
     rf.fit(X_train, y_train)
-    training_time = time.time() - start_time
-    
-    print(f"✓ Training completato in {training_time:.2f} s")
-    
-    return rf, training_time
+    train_time_s = time.time() - start_time
+
+    print(f"Training completed in {train_time_s:.2f} s")
+
+    return rf, train_time_s
+
+
+def predict_rf(
+    rf_model: RandomForestRegressor,
+    X: np.ndarray,
+) -> Tuple[np.ndarray, float]:
+    """
+    Predict with Random Forest and return prediction time.
+    """
+    start_time = time.time()
+    y_pred = rf_model.predict(X)
+    prediction_time_s = time.time() - start_time
+
+    return y_pred, prediction_time_s
 
 
 # ============================================================================
-# VALUTAZIONE MODELLI
+# METRICS
 # ============================================================================
 
-def evaluate_model(
-    model,
-    X_train: np.ndarray,
-    y_train: np.ndarray,
-    X_test: np.ndarray,
-    y_test: np.ndarray,
-    model_name: str = "Model"
+def compute_metrics(
+    y_true_train: np.ndarray,
+    y_pred_train: np.ndarray,
+    y_true_test: np.ndarray,
+    y_pred_test: np.ndarray,
+    model_name: str,
+    train_time_s: float,
+    prediction_time_s: float,
+    y_std_test: np.ndarray = None,
 ) -> Dict[str, float]:
     """
-    Valuta performance modello su train e test.
-    
-    Returns
-    -------
-    metrics : dict
-        {
-            'model': str,
-            'train_r2', 'train_rmse', 'train_mae',
-            'test_r2', 'test_rmse', 'test_mae',
-            'y_train_pred', 'y_test_pred'
-        }
+    Compute train/test metrics.
     """
-    # Predizioni
-    y_train_pred = model.predict(X_train)
-    y_test_pred = model.predict(X_test)
-    
-    # Metriche train
-    train_r2 = r2_score(y_train, y_train_pred)
-    train_rmse = np.sqrt(mean_squared_error(y_train, y_train_pred))
-    train_mae = mean_absolute_error(y_train, y_train_pred)
-    
-    # Metriche test
-    test_r2 = r2_score(y_test, y_test_pred)
-    test_rmse = np.sqrt(mean_squared_error(y_test, y_test_pred))
-    test_mae = mean_absolute_error(y_test, y_test_pred)
-    
-    print(f"\n--- {model_name.upper()} PERFORMANCE ---")
-    print(f"Training Set:")
-    print(f"  R²:   {train_r2:.6f}")
-    print(f"  RMSE: {train_rmse*1000:.3f} mm")
-    print(f"  MAE:  {train_mae*1000:.3f} mm")
-    print(f"\nTest Set:")
-    print(f"  R²:   {test_r2:.6f}")
-    print(f"  RMSE: {test_rmse*1000:.3f} mm")
-    print(f"  MAE:  {test_mae*1000:.3f} mm")
-    
+    train_rmse = np.sqrt(mean_squared_error(y_true_train, y_pred_train))
+    train_mae = mean_absolute_error(y_true_train, y_pred_train)
+    train_r2 = r2_score(y_true_train, y_pred_train)
+
+    test_rmse = np.sqrt(mean_squared_error(y_true_test, y_pred_test))
+    test_mae = mean_absolute_error(y_true_test, y_pred_test)
+    test_r2 = r2_score(y_true_test, y_pred_test)
+
+    high_mask = y_true_test > HIGH_OUTREACH_THRESHOLD
+
+    if np.any(high_mask):
+        high_rmse = np.sqrt(
+            mean_squared_error(y_true_test[high_mask], y_pred_test[high_mask])
+        )
+        high_mae = mean_absolute_error(
+            y_true_test[high_mask],
+            y_pred_test[high_mask],
+        )
+        high_r2 = r2_score(
+            y_true_test[high_mask],
+            y_pred_test[high_mask],
+        )
+        high_n = int(np.sum(high_mask))
+    else:
+        high_rmse = np.nan
+        high_mae = np.nan
+        high_r2 = np.nan
+        high_n = 0
+
+    errors_test = y_pred_test - y_true_test
+
+    if y_std_test is not None:
+        mean_pred_std = float(np.mean(y_std_test))
+    else:
+        mean_pred_std = np.nan
+
     return {
-        'model': model_name,
-        'train_r2': train_r2,
-        'train_rmse': train_rmse,
-        'train_mae': train_mae,
-        'test_r2': test_r2,
-        'test_rmse': test_rmse,
-        'test_mae': test_mae,
-        'y_train_pred': y_train_pred,
-        'y_test_pred': y_test_pred
+        "model": model_name,
+        "train_rmse_m": float(train_rmse),
+        "train_mae_m": float(train_mae),
+        "train_r2": float(train_r2),
+        "test_rmse_m": float(test_rmse),
+        "test_mae_m": float(test_mae),
+        "test_r2": float(test_r2),
+        "high_rmse_m": float(high_rmse),
+        "high_mae_m": float(high_mae),
+        "high_r2": float(high_r2),
+        "high_n": int(high_n),
+        "mean_error_m": float(np.mean(errors_test)),
+        "std_error_m": float(np.std(errors_test)),
+        "max_abs_error_m": float(np.max(np.abs(errors_test))),
+        "mean_pred_std_m": float(mean_pred_std),
+        "train_time_s": float(train_time_s),
+        "prediction_time_s": float(prediction_time_s),
+        "has_uncertainty": bool(y_std_test is not None),
     }
 
 
-# ============================================================================
-# VISUALIZZAZIONI
-# ============================================================================
-
-def plot_model_comparison(
-    gp_metrics: Dict,
-    rf_metrics: Dict,
-    save_path: str = 'figures/model_comparison.png'
-) -> None:
+def print_metrics(metrics: Dict[str, float]) -> None:
     """
-    Bar plot comparativo GP vs RF.
+    Print metrics in readable form.
     """
-    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
-    
-    models = ['Gaussian Process', 'Random Forest']
-    
-    # R²
-    ax = axes[0]
-    r2_values = [gp_metrics['test_r2'], rf_metrics['test_r2']]
-    bars = ax.bar(models, r2_values, color=['#3498db', '#e74c3c'],
-                  edgecolor='black', linewidth=1.5, alpha=0.8)
-    ax.set_ylabel('R² Score', fontsize=13, fontweight='bold')
-    ax.set_title('Test R²', fontsize=14, fontweight='bold')
-    ax.set_ylim([0.80, 1.0])
-    ax.grid(True, alpha=0.3, axis='y')
-    
-    # Aggiungi valori sopra barre
-    for bar, val in zip(bars, r2_values):
-        height = bar.get_height()
-        ax.text(bar.get_x() + bar.get_width()/2., height + 0.002,
-                f'{val:.4f}', ha='center', va='bottom',
-                fontsize=11, fontweight='bold')
-    
-    # RMSE
-    ax = axes[1]
-    rmse_values = [gp_metrics['test_rmse']*1000, rf_metrics['test_rmse']*1000]
-    bars = ax.bar(models, rmse_values, color=['#3498db', '#e74c3c'],
-                  edgecolor='black', linewidth=1.5, alpha=0.8)
-    ax.set_ylabel('RMSE [mm]', fontsize=13, fontweight='bold')
-    ax.set_title('Test RMSE', fontsize=14, fontweight='bold')
-    ax.grid(True, alpha=0.3, axis='y')
-    
-    for bar, val in zip(bars, rmse_values):
-        height = bar.get_height()
-        ax.text(bar.get_x() + bar.get_width()/2., height + 0.5,
-                f'{val:.2f}', ha='center', va='bottom',
-                fontsize=11, fontweight='bold')
-    
-    # MAE
-    ax = axes[2]
-    mae_values = [gp_metrics['test_mae']*1000, rf_metrics['test_mae']*1000]
-    bars = ax.bar(models, mae_values, color=['#3498db', '#e74c3c'],
-                  edgecolor='black', linewidth=1.5, alpha=0.8)
-    ax.set_ylabel('MAE [mm]', fontsize=13, fontweight='bold')
-    ax.set_title('Test MAE', fontsize=14, fontweight='bold')
-    ax.grid(True, alpha=0.3, axis='y')
-    
-    for bar, val in zip(bars, mae_values):
-        height = bar.get_height()
-        ax.text(bar.get_x() + bar.get_width()/2., height + 0.3,
-                f'{val:.2f}', ha='center', va='bottom',
-                fontsize=11, fontweight='bold')
-    
-    plt.suptitle('Model Comparison: Gaussian Process vs Random Forest',
-                 fontsize=16, fontweight='bold', y=1.02)
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    print(f"\n✓ Comparison plot salvato: {save_path}")
-    plt.close()
+    print("\n" + "-" * 80)
+    print(metrics["model"])
+    print("-" * 80)
+    print("Training set:")
+    print(f"  RMSE:              {metrics['train_rmse_m'] * 1000:.3f} mm")
+    print(f"  MAE:               {metrics['train_mae_m'] * 1000:.3f} mm")
+    print(f"  R²:                {metrics['train_r2']:.6f}")
+
+    print("Test set:")
+    print(f"  RMSE:              {metrics['test_rmse_m'] * 1000:.3f} mm")
+    print(f"  MAE:               {metrics['test_mae_m'] * 1000:.3f} mm")
+    print(f"  R²:                {metrics['test_r2']:.6f}")
+
+    print(f"High-outreach test cases: {metrics['high_n']}")
+    print(f"  High RMSE:         {metrics['high_rmse_m'] * 1000:.3f} mm")
+    print(f"  High MAE:          {metrics['high_mae_m'] * 1000:.3f} mm")
+    print(f"  High R²:           {metrics['high_r2']:.6f}")
+
+    print("Error statistics:")
+    print(f"  Mean error:        {metrics['mean_error_m'] * 1000:.3f} mm")
+    print(f"  Error std:         {metrics['std_error_m'] * 1000:.3f} mm")
+    print(f"  Max abs error:     {metrics['max_abs_error_m'] * 1000:.3f} mm")
+
+    if metrics["has_uncertainty"]:
+        print(f"  Mean pred std:     {metrics['mean_pred_std_m'] * 1000:.3f} mm")
+    else:
+        print("  Mean pred std:     not available")
+
+    print(f"Training time:       {metrics['train_time_s']:.3f} s")
+    print(f"Prediction time:     {metrics['prediction_time_s']:.6f} s")
 
 
-def plot_rf_parity(
+# ============================================================================
+# SAVING
+# ============================================================================
+
+def save_metrics(metrics_df: pd.DataFrame) -> Path:
+    """
+    Save model comparison metrics.
+    """
+    df = metrics_df.copy()
+
+    metric_cols_m = [
+        "train_rmse_m",
+        "train_mae_m",
+        "test_rmse_m",
+        "test_mae_m",
+        "high_rmse_m",
+        "high_mae_m",
+        "mean_error_m",
+        "std_error_m",
+        "max_abs_error_m",
+        "mean_pred_std_m",
+    ]
+
+    for col in metric_cols_m:
+        df[col.replace("_m", "_mm")] = df[col] * 1000.0
+
+    path = RESULTS_DIR / "gp_vs_rf_metrics.csv"
+    df.to_csv(path, index=False)
+
+    print(f"Saved: {path}")
+    return path
+
+
+def save_predictions(
     y_train: np.ndarray,
-    y_train_pred: np.ndarray,
     y_test: np.ndarray,
-    y_test_pred: np.ndarray,
-    metrics: Dict,
-    save_path: str = 'figures/rf_parity_plot.png'
-) -> None:
+    gp_train_pred: np.ndarray,
+    gp_test_pred: np.ndarray,
+    rf_train_pred: np.ndarray,
+    rf_test_pred: np.ndarray,
+    gp_test_std: np.ndarray,
+) -> Path:
     """
-    Parity plot per Random Forest.
+    Save train and test predictions.
     """
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 7))
-    
-    # Train
-    ax1.scatter(y_train, y_train_pred, alpha=0.6, s=50,
-                edgecolors='black', linewidth=0.5)
-    ax1.plot([y_train.min(), y_train.max()],
-             [y_train.min(), y_train.max()],
-             'r--', linewidth=2, label='Identity')
-    ax1.set_xlabel('True Peak Outreach [m]', fontsize=12, fontweight='bold')
-    ax1.set_ylabel('Predicted Peak Outreach [m]', fontsize=12, fontweight='bold')
-    ax1.set_title(f'Random Forest - Training (R²={metrics["train_r2"]:.4f})',
-                  fontsize=13, fontweight='bold')
-    ax1.legend(fontsize=11)
-    ax1.grid(True, alpha=0.3)
-    
-    # Test
-    ax2.scatter(y_test, y_test_pred, alpha=0.6, s=50, c='orange',
-                edgecolors='black', linewidth=0.5)
-    ax2.plot([y_test.min(), y_test.max()],
-             [y_test.min(), y_test.max()],
-             'r--', linewidth=2, label='Identity')
-    ax2.set_xlabel('True Peak Outreach [m]', fontsize=12, fontweight='bold')
-    ax2.set_ylabel('Predicted Peak Outreach [m]', fontsize=12, fontweight='bold')
-    ax2.set_title(f'Random Forest - Test (R²={metrics["test_r2"]:.4f})',
-                  fontsize=13, fontweight='bold')
-    ax2.legend(fontsize=11)
-    ax2.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    print(f"✓ RF parity plot salvato: {save_path}")
-    plt.close()
+    train_df = pd.DataFrame({
+        "split": "train",
+        "y_true": y_train,
+        "gp_pred": gp_train_pred,
+        "rf_pred": rf_train_pred,
+        "gp_std": np.nan,
+        "gp_error": gp_train_pred - y_train,
+        "rf_error": rf_train_pred - y_train,
+    })
+
+    test_df = pd.DataFrame({
+        "split": "test",
+        "y_true": y_test,
+        "gp_pred": gp_test_pred,
+        "rf_pred": rf_test_pred,
+        "gp_std": gp_test_std,
+        "gp_error": gp_test_pred - y_test,
+        "rf_error": rf_test_pred - y_test,
+    })
+
+    pred_df = pd.concat([train_df, test_df], axis=0, ignore_index=True)
+
+    path = RESULTS_DIR / "gp_vs_rf_predictions.csv"
+    pred_df.to_csv(path, index=False)
+
+    print(f"Saved: {path}")
+    return path
 
 
-def plot_rf_feature_importance(
-    rf: RandomForestRegressor,
-    feature_names: List[str],
-    save_path: str = 'figures/rf_feature_importance.png'
+def save_rf_feature_importance(
+    rf_model: RandomForestRegressor,
 ) -> pd.DataFrame:
     """
-    Plot feature importance da Random Forest.
+    Save Random Forest feature importances.
     """
-    importances = rf.feature_importances_
-    
-    # DataFrame
-    df = pd.DataFrame({
-        'Feature': feature_names,
-        'Importance': importances
-    }).sort_values('Importance', ascending=False)
-    
-    # Plot
-    fig, ax = plt.subplots(figsize=(12, 7))
-    
-    colors = plt.cm.viridis(np.linspace(0.3, 0.9, len(df)))
-    bars = ax.bar(df['Feature'], df['Importance'],
-                  color=colors, edgecolor='black', linewidth=1.5)
-    
-    # Valori sopra barre
-    for bar in bars:
-        height = bar.get_height()
-        ax.text(bar.get_x() + bar.get_width()/2., height + 0.005,
-                f'{height:.3f}', ha='center', va='bottom',
-                fontsize=10, fontweight='bold')
-    
-    ax.set_ylabel('Importance', fontsize=13, fontweight='bold')
-    ax.set_title('Random Forest: Feature Importance Ranking',
-                 fontsize=15, fontweight='bold', pad=20)
-    ax.grid(True, alpha=0.3, axis='y')
-    plt.xticks(rotation=45, ha='right', fontsize=11)
-    
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    print(f"✓ RF feature importance salvato: {save_path}")
+    importance_df = pd.DataFrame({
+        "feature": PARAM_COLS,
+        "importance": rf_model.feature_importances_,
+    })
+
+    importance_df = importance_df.sort_values(
+        "importance",
+        ascending=False,
+    ).reset_index(drop=True)
+
+    importance_df["rank"] = np.arange(1, len(importance_df) + 1)
+
+    path = RESULTS_DIR / "rf_feature_importance.csv"
+    importance_df.to_csv(path, index=False)
+
+    print(f"Saved: {path}")
+    return importance_df
+
+
+def save_text_summary(metrics_df: pd.DataFrame) -> Path:
+    """
+    Save a short text summary for report writing.
+    """
+    gp = metrics_df[metrics_df["model"] == "Gaussian Process"].iloc[0]
+    rf = metrics_df[metrics_df["model"] == "Random Forest"].iloc[0]
+
+    delta_rmse_mm = (gp["test_rmse_m"] - rf["test_rmse_m"]) * 1000.0
+    delta_mae_mm = (gp["test_mae_m"] - rf["test_mae_m"]) * 1000.0
+    delta_r2 = gp["test_r2"] - rf["test_r2"]
+
+    lines = []
+    lines.append("MODEL COMPARISON SUMMARY")
+    lines.append("=" * 80)
+    lines.append("")
+    lines.append("Task:")
+    lines.append("  Main surrogate prediction: input parameters -> peak_y")
+    lines.append("")
+    lines.append("Test performance:")
+    lines.append(
+        f"  Gaussian Process: RMSE = {gp['test_rmse_m'] * 1000:.2f} mm, "
+        f"MAE = {gp['test_mae_m'] * 1000:.2f} mm, "
+        f"R2 = {gp['test_r2']:.4f}"
+    )
+    lines.append(
+        f"  Random Forest:    RMSE = {rf['test_rmse_m'] * 1000:.2f} mm, "
+        f"MAE = {rf['test_mae_m'] * 1000:.2f} mm, "
+        f"R2 = {rf['test_r2']:.4f}"
+    )
+    lines.append("")
+    lines.append("Difference GP - RF:")
+    lines.append(f"  Delta RMSE = {delta_rmse_mm:+.2f} mm")
+    lines.append(f"  Delta MAE  = {delta_mae_mm:+.2f} mm")
+    lines.append(f"  Delta R2   = {delta_r2:+.4f}")
+    lines.append("")
+    lines.append("Interpretation:")
+    lines.append(
+        "  The Random Forest is used as a non-parametric baseline. "
+        "Even when its accuracy is competitive, the Gaussian Process is "
+        "preferred for the final inverse optimization framework because it "
+        "provides predictive uncertainty and ARD-based interpretability."
+    )
+    lines.append(
+        "  The auxiliary max_xr surrogate is not included in this comparison, "
+        "because it is a constraint-guidance model and is evaluated separately "
+        "using constraint-specific metrics."
+    )
+
+    path = RESULTS_DIR / "model_comparison_summary.txt"
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+    print(f"Saved: {path}")
+    return path
+
+
+# ============================================================================
+# PLOTS
+# ============================================================================
+
+def plot_metrics(metrics_df: pd.DataFrame) -> None:
+    """
+    Plot model comparison metrics.
+    """
+    plot_df = metrics_df.copy()
+    models = plot_df["model"].values
+
+    colors = {
+        "Gaussian Process": "#1f77b4",
+        "Random Forest": "#ff7f0e",
+    }
+
+    fig, axes = plt.subplots(1, 3, figsize=(17, 5.5))
+
+    metric_specs = [
+        ("test_rmse_m", "Test RMSE [mm]", "Lower is better"),
+        ("test_mae_m", "Test MAE [mm]", "Lower is better"),
+        ("test_r2", "Test R²", "Higher is better"),
+    ]
+
+    for ax, (metric, ylabel, subtitle) in zip(axes, metric_specs):
+        if metric.endswith("_m"):
+            values = plot_df[metric].values * 1000.0
+        else:
+            values = plot_df[metric].values
+
+        bar_colors = [colors[m] for m in models]
+
+        bars = ax.bar(
+            models,
+            values,
+            color=bar_colors,
+            edgecolor="black",
+            linewidth=1.0,
+            alpha=0.85,
+        )
+
+        ax.set_ylabel(ylabel)
+        ax.set_title(subtitle)
+        ax.grid(True, axis="y", alpha=0.3)
+
+        if metric == "test_r2":
+            ax.set_ylim(0.90, 1.00)
+
+        for bar, value in zip(bars, values):
+            if metric == "test_r2":
+                label = f"{value:.4f}"
+                offset = 0.002
+            else:
+                label = f"{value:.2f}"
+                offset = max(values) * 0.02
+
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height() + offset,
+                label,
+                ha="center",
+                va="bottom",
+                fontsize=10,
+                fontweight="bold",
+            )
+
+    plt.suptitle(
+        "Model Comparison: Gaussian Process vs Random Forest",
+        fontsize=15,
+        fontweight="bold",
+    )
+    plt.tight_layout(rect=[0, 0, 1, 0.94])
+
+    path = FIGURES_DIR / "gp_vs_rf_metrics.png"
+    plt.savefig(path, dpi=300, bbox_inches="tight")
     plt.close()
-    
-    return df
+
+    print(f"Saved: {path}")
+
+
+def plot_parity(
+    y_test: np.ndarray,
+    gp_test_pred: np.ndarray,
+    rf_test_pred: np.ndarray,
+    gp_metrics: Dict[str, float],
+    rf_metrics: Dict[str, float],
+) -> None:
+    """
+    Plot GP and RF parity plots on the fixed test set.
+    """
+    y_min = min(y_test.min(), gp_test_pred.min(), rf_test_pred.min())
+    y_max = max(y_test.max(), gp_test_pred.max(), rf_test_pred.max())
+
+    margin = 0.03
+    lims = [y_min - margin, y_max + margin]
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+    configs = [
+        (
+            axes[0],
+            gp_test_pred,
+            "Gaussian Process",
+            "#1f77b4",
+            gp_metrics,
+        ),
+        (
+            axes[1],
+            rf_test_pred,
+            "Random Forest",
+            "#ff7f0e",
+            rf_metrics,
+        ),
+    ]
+
+    for ax, y_pred, title, color, metrics in configs:
+        ax.scatter(
+            y_test,
+            y_pred,
+            s=38,
+            alpha=0.72,
+            color=color,
+            edgecolor="black",
+            linewidth=0.4,
+        )
+
+        ax.plot(
+            lims,
+            lims,
+            linestyle="--",
+            color="black",
+            linewidth=1.8,
+            label="Ideal prediction",
+        )
+
+        ax.axvline(
+            HIGH_OUTREACH_THRESHOLD,
+            linestyle=":",
+            color="gray",
+            linewidth=1.5,
+            label="High-outreach threshold",
+        )
+
+        ax.axhline(
+            HIGH_OUTREACH_THRESHOLD,
+            linestyle=":",
+            color="gray",
+            linewidth=1.5,
+        )
+
+        ax.set_xlim(lims)
+        ax.set_ylim(lims)
+        ax.set_xlabel("True peak_y [m]")
+        ax.set_ylabel("Predicted peak_y [m]")
+        ax.set_title(
+            f"{title}\n"
+            f"RMSE = {metrics['test_rmse_m'] * 1000:.2f} mm, "
+            f"R² = {metrics['test_r2']:.4f}"
+        )
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=9)
+
+    plt.suptitle(
+        "Parity Plot on Fixed Test Set",
+        fontsize=15,
+        fontweight="bold",
+    )
+    plt.tight_layout(rect=[0, 0, 1, 0.93])
+
+    path = FIGURES_DIR / "gp_vs_rf_parity.png"
+    plt.savefig(path, dpi=300, bbox_inches="tight")
+    plt.close()
+
+    print(f"Saved: {path}")
+
+
+def plot_residuals(
+    y_test: np.ndarray,
+    gp_test_pred: np.ndarray,
+    rf_test_pred: np.ndarray,
+) -> None:
+    """
+    Plot residuals against true peak_y.
+    """
+    gp_error_mm = (gp_test_pred - y_test) * 1000.0
+    rf_error_mm = (rf_test_pred - y_test) * 1000.0
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    ax.scatter(
+        y_test,
+        gp_error_mm,
+        s=35,
+        alpha=0.70,
+        color="#1f77b4",
+        edgecolor="black",
+        linewidth=0.3,
+        label="Gaussian Process",
+    )
+
+    ax.scatter(
+        y_test,
+        rf_error_mm,
+        s=35,
+        alpha=0.70,
+        color="#ff7f0e",
+        edgecolor="black",
+        linewidth=0.3,
+        label="Random Forest",
+    )
+
+    ax.axhline(
+        0.0,
+        linestyle="--",
+        color="black",
+        linewidth=1.5,
+    )
+
+    ax.axvline(
+        HIGH_OUTREACH_THRESHOLD,
+        linestyle=":",
+        color="gray",
+        linewidth=1.5,
+        label="High-outreach threshold",
+    )
+
+    ax.set_xlabel("True peak_y [m]")
+    ax.set_ylabel("Prediction error [mm]")
+    ax.set_title("Residuals on Fixed Test Set")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+
+    plt.tight_layout()
+
+    path = FIGURES_DIR / "gp_vs_rf_residuals.png"
+    plt.savefig(path, dpi=300, bbox_inches="tight")
+    plt.close()
+
+    print(f"Saved: {path}")
+
+
+def plot_error_distribution(
+    y_test: np.ndarray,
+    gp_test_pred: np.ndarray,
+    rf_test_pred: np.ndarray,
+) -> None:
+    """
+    Plot error distribution for both models.
+    """
+    gp_error_mm = (gp_test_pred - y_test) * 1000.0
+    rf_error_mm = (rf_test_pred - y_test) * 1000.0
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    bins = np.linspace(
+        min(gp_error_mm.min(), rf_error_mm.min()),
+        max(gp_error_mm.max(), rf_error_mm.max()),
+        30,
+    )
+
+    ax.hist(
+        gp_error_mm,
+        bins=bins,
+        alpha=0.65,
+        color="#1f77b4",
+        edgecolor="black",
+        label="Gaussian Process",
+    )
+
+    ax.hist(
+        rf_error_mm,
+        bins=bins,
+        alpha=0.65,
+        color="#ff7f0e",
+        edgecolor="black",
+        label="Random Forest",
+    )
+
+    ax.axvline(
+        0.0,
+        linestyle="--",
+        color="black",
+        linewidth=1.5,
+    )
+
+    ax.set_xlabel("Prediction error [mm]")
+    ax.set_ylabel("Count")
+    ax.set_title("Prediction Error Distribution")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+
+    plt.tight_layout()
+
+    path = FIGURES_DIR / "gp_vs_rf_error_distribution.png"
+    plt.savefig(path, dpi=300, bbox_inches="tight")
+    plt.close()
+
+    print(f"Saved: {path}")
+
+
+def plot_rf_feature_importance(rf_importance_df, save_path):
+    """
+    Plot Random Forest feature importance with a warm color gradient.
+    """
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from pathlib import Path
+
+    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+
+    # Sort from least important to most important so the biggest bar is on top after barh
+    df_plot = rf_importance_df.sort_values("importance", ascending=True).reset_index(drop=True)
+
+    fig, ax = plt.subplots(figsize=(11, 6.5))
+
+    # Warm gradient: light orange -> deep orange/red
+    colors = plt.cm.YlOrRd(np.linspace(0.35, 0.90, len(df_plot)))
+
+    bars = ax.barh(
+        df_plot["feature"],
+        df_plot["importance"],
+        color=colors,
+        edgecolor="black",
+        linewidth=1.2
+    )
+
+    # Value labels
+    for bar in bars:
+        width = bar.get_width()
+        ax.text(
+            width + 0.005,
+            bar.get_y() + bar.get_height() / 2,
+            f"{width:.3f}",
+            va="center",
+            ha="left",
+            fontsize=10,
+            fontweight="bold"
+        )
+
+    ax.set_title(
+        "Random Forest: Feature Importance Ranking",
+        fontsize=16,
+        fontweight="bold",
+        pad=14
+    )
+    ax.set_xlabel("Feature Importance", fontsize=12, fontweight="bold")
+    ax.set_ylabel("")
+    ax.grid(axis="x", alpha=0.25, linestyle="--")
+    ax.set_xlim(0, max(df_plot["importance"]) * 1.12)
+
+    # Make style cleaner
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches="tight")
+    plt.close()
+
+    print(f"Saved: {save_path}")
 
 
 # ============================================================================
-# MAIN: Pipeline completa comparison
+# MAIN
 # ============================================================================
+
+def main() -> None:
+    """
+    Run complete GP vs Random Forest comparison.
+    """
+    print("\n" + "=" * 80)
+    print("MODEL COMPARISON: GAUSSIAN PROCESS vs RANDOM FOREST")
+    print("=" * 80)
+    print("Task: input parameters -> peak_y")
+    print("=" * 80)
+
+    X, y, df = load_dataset()
+    print_dataset_summary(df)
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X,
+        y,
+        test_size=TEST_SIZE,
+        random_state=RANDOM_STATE,
+        shuffle=True,
+    )
+
+    print("\nTrain/test split:")
+    print(f"  Train samples:            {len(y_train)}")
+    print(f"  Test samples:             {len(y_test)}")
+    print(f"  Random state:             {RANDOM_STATE}")
+
+    # ----------------------------------------------------------------------
+    # Gaussian Process prediction
+    # ----------------------------------------------------------------------
+    print("\n" + "=" * 80)
+    print("LOADING FINAL GAUSSIAN PROCESS")
+    print("=" * 80)
+
+    gp_model, scaler_X, scaler_y = load_final_gp()
+
+    print(f"Loaded GP model:     {GP_MODEL_PATH}")
+    print(f"Loaded scaler_X:     {GP_SCALER_X_PATH}")
+    print(f"Loaded scaler_y:     {GP_SCALER_Y_PATH}")
+
+    gp_train_pred, _, gp_train_pred_time = predict_gp(
+        gp_model,
+        scaler_X,
+        scaler_y,
+        X_train,
+    )
+
+    gp_test_pred, gp_test_std, gp_test_pred_time = predict_gp(
+        gp_model,
+        scaler_X,
+        scaler_y,
+        X_test,
+    )
+
+    gp_prediction_time_s = gp_train_pred_time + gp_test_pred_time
+
+    # The final GP was already trained in model_peak_y.py.
+    # Here we only load it, so train_time_s is set to NaN.
+    gp_metrics = compute_metrics(
+        y_true_train=y_train,
+        y_pred_train=gp_train_pred,
+        y_true_test=y_test,
+        y_pred_test=gp_test_pred,
+        model_name="Gaussian Process",
+        train_time_s=np.nan,
+        prediction_time_s=gp_prediction_time_s,
+        y_std_test=gp_test_std,
+    )
+
+    print_metrics(gp_metrics)
+
+    # ----------------------------------------------------------------------
+    # Random Forest training and prediction
+    # ----------------------------------------------------------------------
+    rf_model, rf_train_time_s = train_random_forest(
+        X_train=X_train,
+        y_train=y_train,
+    )
+
+    rf_train_pred, rf_train_pred_time = predict_rf(
+        rf_model,
+        X_train,
+    )
+
+    rf_test_pred, rf_test_pred_time = predict_rf(
+        rf_model,
+        X_test,
+    )
+
+    rf_prediction_time_s = rf_train_pred_time + rf_test_pred_time
+
+    rf_metrics = compute_metrics(
+        y_true_train=y_train,
+        y_pred_train=rf_train_pred,
+        y_true_test=y_test,
+        y_pred_test=rf_test_pred,
+        model_name="Random Forest",
+        train_time_s=rf_train_time_s,
+        prediction_time_s=rf_prediction_time_s,
+        y_std_test=None,
+    )
+
+    print_metrics(rf_metrics)
+
+    # ----------------------------------------------------------------------
+    # Save numerical results
+    # ----------------------------------------------------------------------
+    metrics_df = pd.DataFrame([gp_metrics, rf_metrics])
+
+    save_metrics(metrics_df)
+
+    save_predictions(
+        y_train=y_train,
+        y_test=y_test,
+        gp_train_pred=gp_train_pred,
+        gp_test_pred=gp_test_pred,
+        rf_train_pred=rf_train_pred,
+        rf_test_pred=rf_test_pred,
+        gp_test_std=gp_test_std,
+    )
+
+    importance_df = save_rf_feature_importance(rf_model)
+
+    save_text_summary(metrics_df)
+
+    # ----------------------------------------------------------------------
+    # Plots
+    # ----------------------------------------------------------------------
+    print("\n" + "=" * 80)
+    print("GENERATING PLOTS")
+    print("=" * 80)
+
+    plot_metrics(metrics_df)
+
+    plot_parity(
+        y_test=y_test,
+        gp_test_pred=gp_test_pred,
+        rf_test_pred=rf_test_pred,
+        gp_metrics=gp_metrics,
+        rf_metrics=rf_metrics,
+    )
+
+    plot_residuals(
+        y_test=y_test,
+        gp_test_pred=gp_test_pred,
+        rf_test_pred=rf_test_pred,
+    )
+
+    plot_error_distribution(
+        y_test=y_test,
+        gp_test_pred=gp_test_pred,
+        rf_test_pred=rf_test_pred,
+    )
+
+    plot_rf_feature_importance(
+        importance_df,
+        save_path=FIGURES_DIR / "rf_feature_importance.png",
+    )
+
+    # ----------------------------------------------------------------------
+    # Final interpretation
+    # ----------------------------------------------------------------------
+    print("\n" + "=" * 80)
+    print("FINAL INTERPRETATION")
+    print("=" * 80)
+
+    delta_rmse_mm = (
+        gp_metrics["test_rmse_m"] - rf_metrics["test_rmse_m"]
+    ) * 1000.0
+
+    delta_mae_mm = (
+        gp_metrics["test_mae_m"] - rf_metrics["test_mae_m"]
+    ) * 1000.0
+
+    delta_r2 = gp_metrics["test_r2"] - rf_metrics["test_r2"]
+
+    print("Difference GP - RF:")
+    print(f"  Delta RMSE: {delta_rmse_mm:+.3f} mm")
+    print(f"  Delta MAE:  {delta_mae_mm:+.3f} mm")
+    print(f"  Delta R²:   {delta_r2:+.5f}")
+
+    print("\nWhy the GP is selected:")
+    print("  - It provides predictive uncertainty.")
+    print("  - It provides ARD-based interpretability.")
+    print("  - It is smooth and suitable for inverse optimization.")
+    print("  - It is already integrated in the constraint-aware framework.")
+
+    print("\nRole of Random Forest:")
+    print("  - Strong non-parametric baseline.")
+    print("  - Useful feature importance comparison.")
+    print("  - No native predictive uncertainty for optimization.")
+
+    print("\nGenerated files:")
+    print(f"  {RESULTS_DIR / 'gp_vs_rf_metrics.csv'}")
+    print(f"  {RESULTS_DIR / 'gp_vs_rf_predictions.csv'}")
+    print(f"  {RESULTS_DIR / 'rf_feature_importance.csv'}")
+    print(f"  {RESULTS_DIR / 'model_comparison_summary.txt'}")
+    print(f"  {FIGURES_DIR / 'gp_vs_rf_metrics.png'}")
+    print(f"  {FIGURES_DIR / 'gp_vs_rf_parity.png'}")
+    print(f"  {FIGURES_DIR / 'gp_vs_rf_residuals.png'}")
+    print(f"  {FIGURES_DIR / 'gp_vs_rf_error_distribution.png'}")
+    print(f"  {FIGURES_DIR / 'rf_feature_importance.png'}")
+    print("=" * 80)
+
 
 if __name__ == "__main__":
-    print("\n" + "="*70)
-    print("MODEL COMPARISON: GAUSSIAN PROCESS vs RANDOM FOREST")
-    print("="*70 + "\n")
-    
-    # ========== 1. Carica dataset ==========
-    X, y = load_dataset('data/dataset_outreach.csv')
-    
-    print(f"Dataset caricato: {X.shape[0]} campioni")
-    
-    # ========== 2. Train/Test split (STESSO del GP) ==========
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y,
-        test_size=0.2,
-        random_state=42,
-        shuffle=True
-    )
-    
-    print(f"Train: {len(y_train)} | Test: {len(y_test)}")
-    
-    # ========== 3. Train Random Forest ==========
-    rf, rf_train_time = train_random_forest(
-        X_train, y_train,
-        n_estimators=100,
-        max_depth=None,
-        min_samples_split=2,
-        random_state=42,
-        verbose=True
-    )
-    
-    # ========== 4. Valuta RF ==========
-    rf_metrics = evaluate_model(
-        rf, X_train, y_train, X_test, y_test,
-        model_name='Random Forest'
-    )
-    
-    # ========== 5. Metriche GP (da results/metrics.csv) ==========
-    print("\n" + "="*70)
-    print("CARICAMENTO METRICHE GP (dal training ufficiale)")
-    print("="*70)
-    
-    try:
-        gp_metrics_df = pd.read_csv('results/metrics.csv')
-        gp_metrics = {
-            'model': 'Gaussian Process',
-            'train_r2': gp_metrics_df['train_r2'].values[0],
-            'train_rmse': gp_metrics_df['train_rmse'].values[0],
-            'train_mae': gp_metrics_df['train_mae'].values[0],
-            'test_r2': gp_metrics_df['test_r2'].values[0],
-            'test_rmse': gp_metrics_df['test_rmse'].values[0],
-            'test_mae': gp_metrics_df['test_mae'].values[0]
-        }
-        
-        print("\n--- GAUSSIAN PROCESS PERFORMANCE (ufficiale) ---")
-        print(f"Test Set:")
-        print(f"  R²:   {gp_metrics['test_r2']:.6f}")
-        print(f"  RMSE: {gp_metrics['test_rmse']*1000:.3f} mm")
-        print(f"  MAE:  {gp_metrics['test_mae']*1000:.3f} mm")
-        
-    except FileNotFoundError:
-        print("\n⚠️  File results/metrics.csv non trovato!")
-        print("    Usando metriche GP di riferimento da 500 campioni:")
-        gp_metrics = {
-            'model': 'Gaussian Process',
-            'train_r2': 0.9876,  # Placeholder
-            'train_rmse': 0.0136,
-            'train_mae': 0.0084,
-            'test_r2': 0.9676,
-            'test_rmse': 0.021970,
-            'test_mae': 0.011078
-        }
-        print(f"  Test R²:   {gp_metrics['test_r2']:.6f}")
-        print(f"  Test RMSE: {gp_metrics['test_rmse']*1000:.3f} mm")
-        print(f"  Test MAE:  {gp_metrics['test_mae']*1000:.3f} mm")
-    
-    # ========== 6. Confronto finale ==========
-    print("\n" + "="*70)
-    print("CONFRONTO FINALE")
-    print("="*70)
-    
-    comparison_data = {
-        'Model': ['Gaussian Process', 'Random Forest'],
-        'Train_R2': [gp_metrics['train_r2'], rf_metrics['train_r2']],
-        'Train_RMSE_mm': [gp_metrics['train_rmse']*1000, rf_metrics['train_rmse']*1000],
-        'Train_MAE_mm': [gp_metrics['train_mae']*1000, rf_metrics['train_mae']*1000],
-        'Test_R2': [gp_metrics['test_r2'], rf_metrics['test_r2']],
-        'Test_RMSE_mm': [gp_metrics['test_rmse']*1000, rf_metrics['test_rmse']*1000],
-        'Test_MAE_mm': [gp_metrics['test_mae']*1000, rf_metrics['test_mae']*1000]
-    }
-    
-    comparison_df = pd.DataFrame(comparison_data)
-    print("\n" + comparison_df.to_string(index=False))
-    
-    # Delta
-    delta_r2 = gp_metrics['test_r2'] - rf_metrics['test_r2']
-    delta_rmse = (gp_metrics['test_rmse'] - rf_metrics['test_rmse']) * 1000
-    delta_mae = (gp_metrics['test_mae'] - rf_metrics['test_mae']) * 1000
-    
-    print(f"\nΔ (GP - RF):")
-    print(f"  R²:   {delta_r2:+.4f}")
-    print(f"  RMSE: {delta_rmse:+.3f} mm")
-    print(f"  MAE:  {delta_mae:+.3f} mm")
-    
-    # ========== 7. Salvataggio ==========
-    Path('results').mkdir(exist_ok=True)
-    comparison_df.to_csv('results/model_comparison.csv', index=False)
-    print(f"\n✓ Comparison salvato: results/model_comparison.csv")
-    
-    # Feature importance
-    param_names = ParameterRanges.get_param_names()
-    rf_importance_df = plot_rf_feature_importance(
-        rf, param_names,
-        save_path='figures/rf_feature_importance.png'
-    )
-    rf_importance_df.to_csv('results/rf_feature_importance.csv', index=False)
-    print(f"✓ RF feature importance salvato: results/rf_feature_importance.csv")
-    
-    # ========== 8. Plot ==========
-    print("\nGenerazione plot...")
-    
-    plot_model_comparison(
-        gp_metrics, rf_metrics,
-        save_path='figures/model_comparison.png'
-    )
-    
-    plot_rf_parity(
-        y_train, rf_metrics['y_train_pred'],
-        y_test, rf_metrics['y_test_pred'],
-        rf_metrics,
-        save_path='figures/rf_parity_plot.png'
-    )
-    
-    # ========== 9. Interpretazione ==========
-    print("\n" + "="*70)
-    print("INTERPRETAZIONE")
-    print("="*70)
-    
-    if delta_r2 > 0.01:
-        winner = "GP superiore"
-    elif delta_r2 < -0.01:
-        winner = "RF superiore"
-    else:
-        winner = "Performance comparabili"
-    
-    print(f"\n{winner}")
-    print(f"\nPerché preferire GP:")
-    print(f"  ✓ Quantifica incertezza (fondamentale per inverse opt.)")
-    print(f"  ✓ ARD interpretability (importance fisica)")
-    print(f"  ✓ Performance: R²={gp_metrics['test_r2']:.4f}")
-    print(f"  ✓ Integrazione naturale in optimization")
-    
-    print(f"\nRF comunque valido:")
-    print(f"  ✓ Robusto e veloce")
-    print(f"  ✓ Feature importance standard")
-    print(f"  ✓ Performance: R²={rf_metrics['test_r2']:.4f}")
-    print(f"  ✗ NO uncertainty quantification")
-    
-    print("\n" + "="*70)
-    print("MODEL COMPARISON COMPLETATO!")
-    print("="*70)
-    print(f"\nFile generati:")
-    print(f"  - results/model_comparison.csv")
-    print(f"  - results/rf_feature_importance.csv")
-    print(f"  - figures/model_comparison.png")
-    print(f"  - figures/rf_parity_plot.png")
-    print(f"  - figures/rf_feature_importance.png")
-    print("="*70 + "\n")
+    main()
