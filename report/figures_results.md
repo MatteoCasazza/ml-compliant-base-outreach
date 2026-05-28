@@ -1,0 +1,105 @@
+# FIGURES for report
+
+
+1. Dataset e augmentation
+figures/augmentation/augmentation_peak_y_distribution.png
+figures/augmentation/augmentation_feasible_high_outreach_count.png
+
+Opzionale:
+figures/augmentation/augmentation_extra_reach_distribution.png
+
+2. Learning curve
+figures/learning_curve/learning_curve_rmse.png
+figures/learning_curve/learning_curve_r2.png
+
+Per slides meglio:
+figures/learning_curve/learning_curve_combined.png
+
+3. GP principale peak_y
+figures/gp/gp_parity_plot.png
+figures/gp/gp_ard_relevance.png
+
+Opzionale/appendix:
+figures/gp/gp_uncertainty.png
+figures/gp/gp_residuals.png
+
+4. GP vincolo max_xr
+figures/gp_constraints/max_xr_parity_plot.png
+figures/gp_constraints/max_xr_constraint_classification.png
+figures/gp_constraints/max_xr_ard_relevance.png
+
+5. Cross-validation
+figures/cross_validation/cv_rmse_by_kernel_alpha.png
+figures/cross_validation/cv_high_rmse_by_kernel_alpha.png
+figures/cross_validation/cv_warnings_by_kernel_alpha.png
+
+Per slides:
+figures/cross_validation/cv_summary.png
+
+6. GP vs Random Forest
+figures/model_comparison/gp_vs_rf_metrics.png
+figures/model_comparison/gp_vs_rf_parity.png
+figures/model_comparison/rf_feature_importance.png
+
+7. Optimizer comparison
+figures/optimizer_comparison/optimizer_comparison_summary.png
+figures/optimizer_comparison/optimizer_comparison_error.png
+figures/optimizer_comparison/optimizer_comparison_violation.png
+
+Opzionale:
+figures/optimizer_comparison/optimizer_comparison_time.png
+figures/optimizer_comparison/optimizer_comparison_evaluations.png
+
+8. Baseline vs constraint-aware optimization
+figures/constraint_aware/target_tracking_baseline_vs_constraint.png
+figures/constraint_aware/constraint_violation_baseline_vs_constraint.png
+figures/constraint_aware/max_xr_baseline_vs_constraint.png
+
+Molto utile anche:
+figures/constraint_aware/final_trajectory_target064.png
+
+Opzionale:
+figures/constraint_aware/optimized_parameters_baseline_vs_constraint.png
+figures/constraint_aware/time_response_target0640_baseline_vs_constraint.png
+
+9. Sensitivity e robustness
+
+Per report principale:
+figures/sensitivity/sensitivity_constraint_aware_target064.png
+figures/robustness/monte_carlo_constraint_aware_target064_noise2.png
+
+Per appendix/stress test:
+figures/robustness/monte_carlo_constraint_aware_target064.png
+
+
+# RESULTS for report
+results/augmentation/dataset_augmentation_summary.csv
+
+results/learning_curve/learning_curve_summary.csv
+
+results/gp/metrics.csv
+results/gp/model_info.txt
+results/gp/test_prediction_errors.csv
+
+results/gp_constraints/metrics_max_xr.csv
+results/gp_constraints/model_info_max_xr.txt
+results/gp_constraints/ard_relevance_max_xr.csv
+
+results/cross_validation/cross_validation_report_table.csv
+results/cross_validation/best_kernel_summary.txt
+
+results/model_comparison/gp_vs_rf_metrics.csv
+results/model_comparison/model_comparison_summary.txt
+results/model_comparison/rf_feature_importance.csv
+
+results/optimizer_comparison/optimizer_comparison_summary.csv
+results/optimizer_comparison/best_optimizer_summary.txt
+
+results/constraint_aware/baseline_vs_constraint_results.csv
+results/constraint_aware/report_summary_baseline_vs_constraint.csv
+results/constraint_aware/final_solution_target064.csv
+
+results/sensitivity/sensitivity_constraint_aware_target064.csv
+
+results/robustness/monte_carlo_constraint_aware_target064_noise2_stats.csv
+results/robustness/monte_carlo_constraint_aware_target064_stats.csv
