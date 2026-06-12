@@ -26,6 +26,8 @@ Author: MatteoCasazza
 Date: 2026
 """
 
+from pathlib import Path
+
 import numpy as np
 from scipy.integrate import solve_ivp
 import matplotlib.pyplot as plt
@@ -138,6 +140,33 @@ def compute_damping(K, M, h):
     return 2.0 * h * np.sqrt(K * M)
 
 
+def compute_natural_frequency(K, M):
+    """
+    Compute the undamped natural frequency of a mass-spring subsystem.
+
+    Formula:
+        omega_n = sqrt(K / M)
+        f_n     = omega_n / (2*pi)
+
+    Inputs
+    ------
+    K : float
+        Stiffness [N/m].
+    M : float
+        Mass [kg].
+
+    Output
+    ------
+    omega_n : float
+        Natural angular frequency [rad/s].
+    f_n : float
+        Natural frequency [Hz].
+    """
+    omega_n = np.sqrt(K / M)
+    f_n = omega_n / (2.0 * np.pi)
+    return float(omega_n), float(f_n)
+
+
 def system_dynamics(t, state, params):
     """
     Compute the time derivative of the 2-DoF system state.
@@ -205,7 +234,7 @@ def system_dynamics(t, state, params):
     return [ddx_b, ddx_r, dx_b, dx_r]
 
 
-def compute_metrics(sol, x_r_max=0.5, y_target=None):
+def compute_metrics(sol, x_r_max=0.5, y_target=None, feasibility_tol=1e-9):
     """
     Compute physical performance metrics from the simulation result.
 
@@ -219,23 +248,28 @@ def compute_metrics(sol, x_r_max=0.5, y_target=None):
         Default is 0.5 m.
     y_target : float, optional
         Desired total outreach target [m].
+    feasibility_tol : float, optional
+        Numerical tolerance used to classify a solution as feasible.
 
     Outputs
     -------
     metrics : dict
         Dictionary containing:
-            peak_y               : maximum total outreach [m]
-            t_peak               : time at which peak_y occurs [s]
-            final_y              : final total outreach [m]
-            max_xr               : maximum robot relative position [m]
-            min_xr               : minimum robot relative position [m]
-            max_abs_xr           : maximum absolute robot relative position [m]
-            max_xb               : maximum base position [m]
-            min_xb               : minimum base position [m]
-            max_abs_xb           : maximum absolute base position [m]
-            x_r_max              : nominal robot reach limit [m]
-            extra_reach          : peak_y - x_r_max [m]
-            constraint_violation : violation of robot upper limit [m]
+            peak_y                    : maximum total outreach [m]
+            t_peak                    : time at which peak_y occurs [s]
+            final_y                   : final total outreach [m]
+            max_xr                    : maximum robot relative position [m]
+            min_xr                    : minimum robot relative position [m]
+            max_abs_xr                : maximum absolute robot relative position [m]
+            max_xb                    : maximum base position [m]
+            min_xb                    : minimum base position [m]
+            max_abs_xb                : maximum absolute base position [m]
+            x_r_max                   : nominal robot reach limit [m]
+            extra_reach               : peak_y - x_r_max [m]
+            constraint_violation      : violation of positive robot limit [m]
+            constraint_violation_abs  : violation of absolute robot limit [m]
+            feasible                  : feasibility using the positive robot limit
+            feasible_abs              : feasibility using the absolute robot limit
 
         If y_target is provided:
             y_target       : target outreach [m]
@@ -256,7 +290,14 @@ def compute_metrics(sol, x_r_max=0.5, y_target=None):
     min_xb = float(np.min(x_b))
     max_abs_xb = float(np.max(np.abs(x_b)))
 
+    # Original one-sided constraint used in the previous pipeline:
+    # x_r(t) <= x_r_max.
     constraint_violation = max(0.0, max_xr - x_r_max)
+
+    # More physically explicit symmetric workspace constraint:
+    # |x_r(t)| <= x_r_max.
+    constraint_violation_abs = max(0.0, max_abs_xr - x_r_max)
+
     extra_reach = peak_y - x_r_max
 
     metrics = {
@@ -272,6 +313,9 @@ def compute_metrics(sol, x_r_max=0.5, y_target=None):
         'x_r_max': float(x_r_max),
         'extra_reach': float(extra_reach),
         'constraint_violation': float(constraint_violation),
+        'constraint_violation_abs': float(constraint_violation_abs),
+        'feasible': bool(constraint_violation <= feasibility_tol),
+        'feasible_abs': bool(constraint_violation_abs <= feasibility_tol),
     }
 
     if y_target is not None:
@@ -281,7 +325,6 @@ def compute_metrics(sol, x_r_max=0.5, y_target=None):
 
     return metrics
 
-
 def simulate_system(
     params,
     T_sim=60.0,
@@ -289,7 +332,8 @@ def simulate_system(
     return_full=False,
     return_metrics=False,
     x_r_max=0.5,
-    y_target=None
+    y_target=None,
+    feasibility_tol=1e-9
 ):
     """
     Simulate the 2-DoF system.
@@ -324,6 +368,8 @@ def simulate_system(
     y_target : float, optional
         Desired total outreach target [m].
         Used only for metric computation.
+    feasibility_tol : float, optional
+        Numerical tolerance used to classify feasibility.
 
     Outputs
     -------
@@ -356,7 +402,12 @@ def simulate_system(
     # Initial state: [dx_b, dx_r, x_b, x_r]
     x0 = [0.0, 0.0, 0.0, params['x_r_start']]
 
-    t_eval = np.arange(0.0, T_sim, dt)
+    if T_sim <= 0:
+        raise ValueError("T_sim must be positive.")
+    if dt <= 0:
+        raise ValueError("dt must be positive.")
+
+    t_eval = np.arange(0.0, T_sim + dt, dt)
 
     sol = solve_ivp(
         system_dynamics,
@@ -378,7 +429,12 @@ def simulate_system(
             return np.nan, {}
         return np.nan
 
-    metrics = compute_metrics(sol, x_r_max=x_r_max, y_target=y_target)
+    metrics = compute_metrics(
+        sol,
+        x_r_max=x_r_max,
+        y_target=y_target,
+        feasibility_tol=feasibility_tol
+    )
     peak_y = metrics['peak_y']
 
     if return_full and return_metrics:
@@ -529,6 +585,8 @@ def plot_simulation_example(
     plt.tight_layout()
 
     if save_path:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         print(f"✓ Figure saved: {save_path}")
 
@@ -582,6 +640,9 @@ if __name__ == "__main__":
     print(f"  Extra reach:            {metrics['extra_reach']:.4f} m")
     print(f"  Max robot position xr:  {metrics['max_xr']:.4f} m")
     print(f"  Constraint violation:   {metrics['constraint_violation']:.4f} m")
+    print(f"  Abs. constraint viol.:  {metrics['constraint_violation_abs']:.4f} m")
+    print(f"  Feasible:               {metrics['feasible']}")
+    print(f"  Feasible abs.:          {metrics['feasible_abs']}")
     print(f"  Target error:           {metrics.get('target_error', np.nan):.4f} m")
 
     print("\nGenerating plot...")

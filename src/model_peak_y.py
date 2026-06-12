@@ -193,12 +193,12 @@ def print_dataset_feasibility_summary(
     try:
         df = load_dataset_dataframe(filepath)
 
-        required_cols = {'constraint_violation', 'extra_reach', 'peak_y'}
+        required_cols = {'constraint_violation_abs', 'extra_reach', 'peak_y'}
         if not required_cols.issubset(df.columns):
             print("\nDataset feasibility metrics not found. Skipping feasibility summary.")
             return
 
-        feasible = df[df['constraint_violation'] <= tolerance]
+        feasible = df[df['constraint_violation_abs'] <= tolerance]
         good = feasible[feasible['extra_reach'] > 0.0]
 
         print("\n" + "=" * 70)
@@ -207,7 +207,7 @@ def print_dataset_feasibility_summary(
         print(f"x_r_max:                    {x_r_max:.3f} m")
         print(f"Constraint tolerance:        {tolerance:.4f} m")
         print(f"Total samples:               {len(df)}")
-        print(f"Feasible samples:            {len(feasible)}")
+        print(f"Feasible abs samples:            {len(feasible)}")
         print(f"Feasible extra-reach cases:  {len(good)}")
         print(f"Max feasible peak_y:         {feasible['peak_y'].max():.6f} m")
         print(f"Max feasible extra_reach:    {good['extra_reach'].max():.6f} m"

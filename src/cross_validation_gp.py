@@ -163,11 +163,18 @@ def print_dataset_summary(df: pd.DataFrame) -> None:
         f"({100 * high_count / len(df):.1f}%)"
     )
 
-    if "constraint_violation" in df.columns:
-        feasible_count = int((df["constraint_violation"] <= 0.0).sum())
+    if "constraint_violation_abs" in df.columns:
+        feasible_abs_count = int((df["constraint_violation_abs"] <= 0.002).sum())
         print(
-            f"  Feasible samples:          {feasible_count} "
-            f"({100 * feasible_count / len(df):.1f}%)"
+            f"  Feasible_abs samples:      {feasible_abs_count} "
+            f"({100 * feasible_abs_count / len(df):.1f}%)"
+        )
+
+    if "feasible_abs" in df.columns:
+        feasible_abs_flag_count = int(df["feasible_abs"].sum())
+        print(
+            f"  Feasible_abs flag samples: {feasible_abs_flag_count} "
+            f"({100 * feasible_abs_flag_count / len(df):.1f}%)"
         )
 
 

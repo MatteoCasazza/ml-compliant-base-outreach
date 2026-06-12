@@ -26,6 +26,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import qmc
 from joblib import Parallel, delayed
+import matplotlib.pyplot as plt
 
 from dynamics import simulate_system
 from dataset import ParameterRanges
@@ -150,11 +151,27 @@ def simulate_parameter_set(
 
         # Keep the same columns as the main dataset.
         row.update({
-            'peak_y': metrics['peak_y'],
-            'max_xr': metrics['max_xr'],
-            'max_xb': metrics['max_xb'],
-            'extra_reach': metrics['extra_reach'],
-            'constraint_violation': metrics['constraint_violation']
+            "peak_y": metrics.get("peak_y", np.nan),
+            "t_peak": metrics.get("t_peak", np.nan),
+            "final_y": metrics.get("final_y", np.nan),
+
+            "max_xr": metrics.get("max_xr", np.nan),
+            "min_xr": metrics.get("min_xr", np.nan),
+            "max_abs_xr": metrics.get("max_abs_xr", np.nan),
+
+            "max_xb": metrics.get("max_xb", np.nan),
+            "min_xb": metrics.get("min_xb", np.nan),
+            "max_abs_xb": metrics.get("max_abs_xb", np.nan),
+
+            "extra_reach": metrics.get("extra_reach", np.nan),
+
+            "constraint_violation": metrics.get("constraint_violation", np.nan),
+            "constraint_violation_abs": metrics.get("constraint_violation_abs", np.nan),
+
+            "feasible": bool(metrics.get("feasible", False)),
+            "feasible_abs": bool(metrics.get("feasible_abs", False)),
+
+            "dataset_type": "targeted_augmented",
         })
 
         return row
@@ -162,12 +179,28 @@ def simulate_parameter_set(
     except Exception as e:
         row = {name: value for name, value in zip(param_names, params_array)}
         row.update({
-            'peak_y': np.nan,
-            'max_xr': np.nan,
-            'max_xb': np.nan,
-            'extra_reach': np.nan,
-            'constraint_violation': np.nan,
-            'error': str(e)
+            "peak_y": np.nan,
+            "t_peak": np.nan,
+            "final_y": np.nan,
+
+            "max_xr": np.nan,
+            "min_xr": np.nan,
+            "max_abs_xr": np.nan,
+
+            "max_xb": np.nan,
+            "min_xb": np.nan,
+            "max_abs_xb": np.nan,
+
+            "extra_reach": np.nan,
+
+            "constraint_violation": np.nan,
+            "constraint_violation_abs": np.nan,
+
+            "feasible": False,
+            "feasible_abs": False,
+
+            "dataset_type": "targeted_augmented",
+            "error": str(e),
         })
         return row
 
@@ -234,9 +267,9 @@ def print_dataset_stats(
     """
     Print compact dataset statistics.
     """
-    feasible = df[df['constraint_violation'] <= tolerance]
-    good = feasible[feasible['extra_reach'] > 0.0]
-    high = feasible[feasible['peak_y'] > 0.60]
+    feasible = df[df["constraint_violation_abs"] <= tolerance]
+    good = feasible[feasible["extra_reach"] > 0.0]
+    high = feasible[feasible["peak_y"] > 0.60]
 
     print("\n" + "=" * 70)
     print(f"{name.upper()} STATISTICS")
@@ -250,7 +283,10 @@ def print_dataset_stats(
     print(f"Max feasible peak_y:         {feasible['peak_y'].max():.6f} m")
     if len(good) > 0:
         print(f"Max feasible extra_reach:    {good['extra_reach'].max():.6f} m")
-    print(f"Violation rate:              {100 * (df['constraint_violation'] > tolerance).mean():.1f}%")
+    print(
+        f"Violation abs rate:         "
+        f"{100 * (df['constraint_violation_abs'] > tolerance).mean():.1f}%"
+    )
     print("=" * 70)
 
 
@@ -272,6 +308,15 @@ def merge_datasets(
 
     common_columns = [col for col in base_df.columns if col in aug_df.columns]
 
+    missing_in_aug = [col for col in base_df.columns if col not in aug_df.columns]
+    missing_in_base = [col for col in aug_df.columns if col not in base_df.columns]
+
+    if missing_in_aug:
+        print(f"Warning: columns missing in augmentation dataset: {missing_in_aug}")
+
+    if missing_in_base:
+        print(f"Warning: columns missing in base dataset: {missing_in_base}")
+
     base_df = base_df[common_columns]
     aug_df = aug_df[common_columns]
 
@@ -282,6 +327,178 @@ def merge_datasets(
 
     return merged_df
 
+
+def save_augmentation_summary(
+    base_df: pd.DataFrame,
+    aug_df: pd.DataFrame,
+    merged_df: pd.DataFrame,
+    output_path: str = "results/augmentation/dataset_augmentation_summary.csv",
+    tolerance: float = 0.002
+) -> pd.DataFrame:
+    """
+    Save before/after augmentation statistics.
+    """
+
+    def summarize(df, name):
+        feasible = df[df["constraint_violation_abs"] <= tolerance]
+        feasible_extra = feasible[feasible["extra_reach"] > 0.0]
+        feasible_high = feasible[feasible["peak_y"] > 0.60]
+
+        return {
+            "dataset": name,
+            "samples": len(df),
+            "peak_y_mean_m": df["peak_y"].mean(),
+            "peak_y_max_m": df["peak_y"].max(),
+            "feasible_abs_samples": len(feasible),
+            "feasible_abs_extra_reach": len(feasible_extra),
+            "feasible_abs_high_outreach": len(feasible_high),
+            "max_feasible_abs_peak_y_m": feasible["peak_y"].max() if len(feasible) > 0 else np.nan,
+            "max_feasible_abs_extra_reach_m": feasible_extra["extra_reach"].max() if len(feasible_extra) > 0 else np.nan,
+            "violation_abs_rate_percent": 100.0 * (df["constraint_violation_abs"] > tolerance).mean(),
+        }
+
+    summary = pd.DataFrame([
+        summarize(base_df, "uniform"),
+        summarize(aug_df, "targeted_augmented"),
+        summarize(merged_df, "augmented"),
+    ])
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    summary.to_csv(output_path, index=False)
+
+    print(f"\n✓ Augmentation summary saved: {output_path}")
+
+    return summary
+
+
+def plot_augmentation_analysis(
+    base_df: pd.DataFrame,
+    aug_df: pd.DataFrame,
+    merged_df: pd.DataFrame,
+    save_dir: str = "figures/augmentation",
+    x_r_max: float = 0.5,
+    high_outreach_threshold: float = 0.60,
+    tolerance: float = 0.002
+) -> None:
+    """
+    Generate plots to justify the targeted augmentation strategy.
+
+    The plots compare the uniform dataset, the targeted augmented dataset,
+    and the final merged dataset.
+    """
+    Path(save_dir).mkdir(parents=True, exist_ok=True)
+
+    # ------------------------------------------------------------
+    # Plot 1: peak_y distribution before/after augmentation
+    # ------------------------------------------------------------
+    plt.figure(figsize=(10, 6))
+
+    plt.hist(
+        base_df["peak_y"],
+        bins=30,
+        alpha=0.6,
+        label="Uniform dataset",
+        edgecolor="black"
+    )
+
+    plt.hist(
+        merged_df["peak_y"],
+        bins=30,
+        alpha=0.5,
+        label="Augmented dataset",
+        edgecolor="black"
+    )
+
+    plt.axvline(x_r_max, linestyle="--", linewidth=2, label="Nominal reach")
+    plt.axvline(high_outreach_threshold, linestyle=":", linewidth=2, label="High-outreach threshold")
+
+    plt.xlabel("Peak outreach $peak_y$ [m]")
+    plt.ylabel("Frequency")
+    plt.title("Peak Outreach Distribution Before and After Augmentation")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+
+    path = Path(save_dir) / "augmentation_peak_y_distribution.png"
+    plt.savefig(path, dpi=300, bbox_inches="tight")
+    plt.close()
+    print(f"✓ Saved: {path}")
+
+    # ------------------------------------------------------------
+    # Plot 2: peak_y vs max_abs_xr feasibility map
+    # ------------------------------------------------------------
+    plt.figure(figsize=(10, 7))
+
+    plt.scatter(
+        base_df["max_abs_xr"],
+        base_df["peak_y"],
+        alpha=0.45,
+        s=35,
+        label="Uniform dataset"
+    )
+
+    plt.scatter(
+        aug_df["max_abs_xr"],
+        aug_df["peak_y"],
+        alpha=0.65,
+        s=35,
+        label="Targeted augmented samples"
+    )
+
+    plt.axvline(x_r_max, linestyle="--", linewidth=2, label="$|x_r|$ limit")
+    plt.axhline(x_r_max, linestyle=":", linewidth=2, label="Nominal reach")
+    plt.axhline(high_outreach_threshold, linestyle="-.", linewidth=2, label="High-outreach threshold")
+
+    plt.xlabel("Maximum absolute robot displacement $max|x_r|$ [m]")
+    plt.ylabel("Peak outreach $peak_y$ [m]")
+    plt.title("Feasible High-Outreach Region Before and After Augmentation")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+
+    path = Path(save_dir) / "augmentation_feasible_high_outreach_region.png"
+    plt.savefig(path, dpi=300, bbox_inches="tight")
+    plt.close()
+    print(f"✓ Saved: {path}")
+
+    # ------------------------------------------------------------
+    # Plot 3: feasible high-outreach sample counts
+    # ------------------------------------------------------------
+    def count_feasible_high(df):
+        feasible = df[df["constraint_violation_abs"] <= tolerance]
+        high = feasible[feasible["peak_y"] > high_outreach_threshold]
+        return len(high)
+
+    counts = pd.DataFrame({
+        "dataset": ["Uniform", "Targeted", "Augmented"],
+        "feasible_high_outreach": [
+            count_feasible_high(base_df),
+            count_feasible_high(aug_df),
+            count_feasible_high(merged_df),
+        ]
+    })
+
+    plt.figure(figsize=(8, 6))
+    plt.bar(
+        counts["dataset"],
+        counts["feasible_high_outreach"],
+        edgecolor="black"
+    )
+
+    plt.ylabel("Number of feasible high-outreach samples")
+    plt.title("Feasible High-Outreach Samples Before and After Augmentation")
+    plt.grid(True, axis="y", alpha=0.3)
+    plt.tight_layout()
+
+    path = Path(save_dir) / "augmentation_feasible_high_outreach_counts.png"
+    plt.savefig(path, dpi=300, bbox_inches="tight")
+    plt.close()
+    print(f"✓ Saved: {path}")
+
+    # Save the count table too
+    counts_path = Path(save_dir) / "augmentation_feasible_high_outreach_counts.csv"
+    counts.to_csv(counts_path, index=False)
+    print(f"✓ Saved: {counts_path}")
 
 # ============================================================================
 # MAIN
@@ -325,6 +542,31 @@ if __name__ == "__main__":
         base_path='data/dataset_outreach.csv',
         augmentation_path=augmentation_path,
         output_path=output_path
+    )
+
+    base_df = pd.read_csv("data/dataset_outreach.csv", comment="#")
+
+    summary = save_augmentation_summary(
+        base_df=base_df,
+        aug_df=df_aug,
+        merged_df=merged_df,
+        output_path="results/augmentation/dataset_augmentation_summary.csv",
+        tolerance=TOLERANCE
+    )
+
+    print("\nAugmentation summary:")
+    print(summary.to_string(index=False))
+
+    print("\nGenerating augmentation analysis plots...")
+
+    plot_augmentation_analysis(
+        base_df=base_df,
+        aug_df=df_aug,
+        merged_df=merged_df,
+        save_dir="figures/augmentation",
+        x_r_max=X_R_MAX,
+        high_outreach_threshold=0.60,
+        tolerance=TOLERANCE
     )
 
     print(f"\n✓ Augmented dataset saved: {output_path}")
