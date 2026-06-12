@@ -1,0 +1,21 @@
+MODEL COMPARISON INTERPRETATION
+================================================================================
+
+Compared models:
+  1. GP pair: independent GP models for peak_y and max_abs_xr.
+  2. NN multi-output: one PyTorch MLP predicting [peak_y, max_abs_xr].
+
+Main accuracy comparison:
+  peak_y RMSE: GP pair = 16.31 mm, NN = 21.08 mm.
+  max_abs_xr RMSE: GP pair = 6.82 mm, NN = 9.89 mm.
+  False feasible rate: GP pair = 0.62%, NN = 1.25%.
+  Near-boundary RMSE: GP pair = 4.44 mm, NN = 4.94 mm.
+
+Interpretation: with the current dataset size, the GP pair provides better predictive accuracy than the NN multi-output surrogate. This is consistent with Gaussian Processes being data-efficient for small to medium-sized datasets.
+
+The NN remains useful because it is differentiable in PyTorch and can be used directly for gradient-based inverse optimization. The GP pair remains the more conservative choice for constraint-aware optimization when accuracy and low false-feasible rate are prioritized.
+
+Inference-time comparison:
+  batch=1: NN multi-output = 209.860 µs/sample
+  batch=1000: NN multi-output = 0.434 µs/sample
+  batch=10000: NN multi-output = 0.215 µs/sample

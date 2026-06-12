@@ -664,7 +664,7 @@ if __name__ == "__main__":
 
     # For a quick test, use 50-100 samples.
     # For the final uniform dataset, use 1000 samples or more.
-    N_SAMPLES = 1000
+    N_SAMPLES = 2000
     T_SIM = 60.0
     DT = 0.001
     X_R_MAX = 0.5
