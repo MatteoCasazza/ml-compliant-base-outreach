@@ -1,2 +1,2 @@
 samples,peak_y_mean_m,peak_y_std_m,peak_y_min_m,peak_y_max_m,feasible_abs_samples,feasible_abs_rate_percent,feasible_abs_extra_reach_samples,feasible_abs_high_outreach_samples,max_feasible_abs_peak_y_m,max_feasible_abs_extra_reach_m,violation_abs_rate_percent,x_r_max_m,high_outreach_threshold_m,feasible_samples_one_sided,violation_rate_one_sided_percent
-1000,0.5110170118787722,0.06323977460464085,0.3915522470480817,0.8251511618565655,560,56.0,114,4,0.6617515206748259,0.1617515206748259,44.0,0.5,0.6,560,44.0
+2000,0.5107827637965242,0.06240690197162155,0.3814463568690328,0.8101891497190006,1095,54.75,219,5,0.646218834544577,0.14621883454457696,45.25,0.5,0.6,1095,45.25

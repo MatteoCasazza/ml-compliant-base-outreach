@@ -1246,7 +1246,7 @@ def main() -> None:
     print(f"  {COMPARISON_FIGURES_DIR / 'model_comparison_near_boundary.png'}")
     print(f"  {COMPARISON_FIGURES_DIR / 'model_comparison_inference_time.png'}")
     print(f"  {COMPARISON_FIGURES_DIR / 'model_comparison_summary.png'}")
-    print("\nNext step: regenerate the final 3000-sample dataset and retrain GP/NN, then rerun this comparison.")
+    print("\nNext step: run constraint-aware inverse optimization.")
     print("=" * 70 + "\n")
 
 

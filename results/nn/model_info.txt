@@ -3,25 +3,25 @@ Multi-output Neural Network Surrogate
 Dataset: C:\Users\casaz\Desktop\Proj2\data\dataset_augmented.csv
 Inputs: ['Kb', 'Kr', 'Mb', 'hb', 'hr', 'f0', 'f1', 'A', 'x_r_start']
 Targets: ['peak_y', 'max_abs_xr']
-Architecture: 128-64
-Learning rate: 0.001
+Architecture: 32-64-32
+Learning rate: 0.0005
 Weight decay: 0.0001
-Best seed: 42
-Best epoch: 554
-Best validation loss: 0.00924925
+Best seed: 123
+Best epoch: 1319
+Best validation loss: 0.00840283
 
 Test metrics:
-peak_y RMSE: 21.080 mm
-peak_y MAE:  9.940 mm
-peak_y R2:   0.959919
-max_abs_xr RMSE: 9.895 mm
-max_abs_xr MAE:  5.065 mm
-max_abs_xr R2:   0.974812
+peak_y RMSE: 15.959 mm
+peak_y MAE:  6.721 mm
+peak_y R2:   0.972515
+max_abs_xr RMSE: 5.132 mm
+max_abs_xr MAE:  3.153 mm
+max_abs_xr R2:   0.991454
 
 Constraint classification, true limit:
-Accuracy:       95.94%
-False feasible: 1.25%
+Accuracy:       97.67%
+False feasible: 1.33%
 
 Near-boundary:
-Samples: 112
-RMSE:    4.942 mm
+Samples: 214
+RMSE:    3.262 mm

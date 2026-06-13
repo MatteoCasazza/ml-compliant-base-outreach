@@ -6,16 +6,16 @@ Compared models:
   2. NN multi-output: one PyTorch MLP predicting [peak_y, max_abs_xr].
 
 Main accuracy comparison:
-  peak_y RMSE: GP pair = 16.31 mm, NN = 21.08 mm.
-  max_abs_xr RMSE: GP pair = 6.82 mm, NN = 9.89 mm.
-  False feasible rate: GP pair = 0.62%, NN = 1.25%.
-  Near-boundary RMSE: GP pair = 4.44 mm, NN = 4.94 mm.
+  peak_y RMSE: GP pair = 13.15 mm, NN = 15.96 mm.
+  max_abs_xr RMSE: GP pair = 3.70 mm, NN = 5.13 mm.
+  False feasible rate: GP pair = 0.33%, NN = 1.33%.
+  Near-boundary RMSE: GP pair = 2.17 mm, NN = 3.26 mm.
 
 Interpretation: with the current dataset size, the GP pair provides better predictive accuracy than the NN multi-output surrogate. This is consistent with Gaussian Processes being data-efficient for small to medium-sized datasets.
 
 The NN remains useful because it is differentiable in PyTorch and can be used directly for gradient-based inverse optimization. The GP pair remains the more conservative choice for constraint-aware optimization when accuracy and low false-feasible rate are prioritized.
 
 Inference-time comparison:
-  batch=1: NN multi-output = 209.860 µs/sample
-  batch=1000: NN multi-output = 0.434 µs/sample
-  batch=10000: NN multi-output = 0.215 µs/sample
+  batch=1: GP pair = 456.880 µs/sample; NN multi-output = 196.560 µs/sample
+  batch=1000: GP pair = 150.339 µs/sample; NN multi-output = 0.771 µs/sample
+  batch=10000: GP pair = 127.567 µs/sample; NN multi-output = 0.491 µs/sample

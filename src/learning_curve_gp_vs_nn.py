@@ -102,7 +102,7 @@ RANDOM_STATE = 42
 
 # With the current 1600-sample dataset, the 80% train pool contains 1280 samples.
 # Values larger than the available train pool are automatically skipped.
-TRAIN_SIZES = [200, 400, 800, 1200, 1280]
+TRAIN_SIZES = [200, 400, 800, 1200, 1600, 2000, 2400]
 
 # GP settings. Keep n_restarts small for learning curves because many GPs are fitted.
 GP_ALPHA = 1e-6

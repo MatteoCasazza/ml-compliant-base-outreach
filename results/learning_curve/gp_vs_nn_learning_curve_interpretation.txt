@@ -1,0 +1,17 @@
+GP VS NN LEARNING CURVE INTERPRETATION
+======================================================================
+
+Dataset: C:\Users\casaz\Desktop\Proj2\data\dataset_augmented.csv
+Fixed test fraction: 0.2
+Training sizes: [200, 400, 800, 1200, 1600, 2000, 2400]
+
+Largest training size: 2400
+
+At the largest training size:
+  GP peak_y RMSE: 13.15 mm | NN peak_y RMSE: 16.07 mm
+  GP max_abs_xr RMSE: 3.70 mm | NN max_abs_xr RMSE: 5.14 mm
+  GP false feasible: 0.33% | NN false feasible: 1.33%
+
+Interpretation guide:
+  If GP error saturates while NN error keeps decreasing, the GP is more sample-efficient for the current dataset, while the NN may benefit more from additional simulations.
+  The main fair comparison is always performed at the same training size. A comparison such as GP with 1600 samples vs NN with 3000 samples can be reported only as a practical engineering trade-off, not as a fair model comparison.

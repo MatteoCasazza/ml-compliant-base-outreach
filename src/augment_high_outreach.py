@@ -506,7 +506,7 @@ def plot_augmentation_analysis(
 
 if __name__ == "__main__":
 
-    N_AUGMENT = 600
+    N_AUGMENT = 1000
     T_SIM = 60.0
     DT = 0.001
     X_R_MAX = 0.5

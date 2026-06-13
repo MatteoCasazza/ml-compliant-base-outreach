@@ -1011,11 +1011,11 @@ if __name__ == "__main__":
 
     DATASET_PATH = DATA_DIR / 'dataset_augmented.csv'
     KERNEL_TYPE = 'matern52'
-    ALPHA = 1e-6
+    ALPHA = 1e-10
 
     # Matern 5/2 is kept as the final kernel because it produced more stable
     # inverse optimization results in previous experiments.
-    N_RESTARTS = 10
+    N_RESTARTS = 3
 
     # 1. Load dataset
     X, y = load_dataset(str(DATASET_PATH))
