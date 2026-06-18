@@ -1,0 +1,2 @@
+method,n_targets,feasible_targets,feasibility_rate_percent,mean_target_error_mm,max_target_error_mm,mean_true_max_abs_xr_m,max_true_max_abs_xr_m,mean_residual_margin_mm,min_residual_margin_mm,mean_constraint_violation_abs_mm,max_constraint_violation_abs_mm,total_true_simulator_calls,mean_optimization_time_s,total_optimization_time_s
+BO,5,5,100.0,31.141299073630854,82.58944054945694,0.4895209238596239,0.49859458189914413,10.479076140376108,1.4054181008558708,0.0,0.0,500,53.537079679989255,267.6853983999463

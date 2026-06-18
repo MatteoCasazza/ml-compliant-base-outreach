@@ -1,0 +1,2 @@
+target,n_seeds,mean_target_error_mm,min_target_error_mm,max_target_error_mm,mean_residual_margin_mm,feasible_rate_percent
+0.65,3,3.5404987792620655,3.449193510746129,3.7231093162939377,0.8671506162844881,100.0

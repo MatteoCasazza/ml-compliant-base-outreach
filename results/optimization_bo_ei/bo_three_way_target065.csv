@@ -1,0 +1,4 @@
+method,peak_y_true,target_error_mm,max_abs_xr_true,residual_margin_mm,feasible_abs,offline_simulator_calls,online_simulator_calls,surrogate_function_evaluations,optimization_time_s,role
+GP+DE,0.643256738134095,6.743261865905015,0.4953806315395831,4.619368460416884,True,3000,5,13159,43.98922467231751,offline GP surrogate + global DE
+NN+Adam,0.6503911012882333,0.3911012882332754,0.4983225596299289,1.677440370071115,True,3000,5,60100,0.6416893005371094,offline NN surrogate + batched Adam
+BO,0.6409169564416943,9.083043558305693,0.48963434947857504,10.365650521424962,True,0,100,0,47.65965879999567,online true-simulator BO baseline
