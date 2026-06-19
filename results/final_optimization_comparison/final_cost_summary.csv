@@ -1,0 +1,5 @@
+method,offline_simulator_calls,online_simulator_calls_total,online_simulator_calls_per_target_mean,total_simulator_calls_equivalent,total_optimization_time_s,mean_optimization_time_s_per_target,total_surrogate_function_evaluations
+GP+DE beta=0.5,3000,125,25.0,3125,196.26350283622742,39.25270056724548,65858.0
+NN+Adam safe,3000,250,50.0,3250,7.150393724441528,1.4300787448883057,801000.0
+BO mean,0,2000,400.0,2000,840.0108254000079,168.0021650800016,0.0
+Random Search mean,0,2000,400.0,2000,426.86011315206997,85.372022630414,0.0
