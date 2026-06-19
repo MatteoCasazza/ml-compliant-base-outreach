@@ -1,0 +1,62 @@
+GP + Differential Evolution Objective Settings
+============================================================
+
+Objective:
+J = ((peak_y_pred - y_target) / y_error_scale)^2
+    + lambda_constraint * max(0, (max_abs_xr_pred - robot_limit_opt) / x_constraint_scale)^2
+    + lambda_uncertainty_peak_y * (std_peak_y / y_error_scale)^2
+    + lambda_uncertainty_max_abs_xr * (std_max_abs_xr / x_constraint_scale)^2
+
+If beta_constraint_std > 0, the constraint term uses max_abs_xr_pred + beta * std_max_abs_xr.
+
+Kb: 1000.0
+Mb: 20.0
+hb: 0.1
+Mr: 10.0
+robot_limit_true: 0.5
+robot_limit_opt: 0.495
+feasibility_tolerance_m: 1e-09
+targets: (0.55, 0.6, 0.65, 0.7, 0.75)
+Kr_min: 1500.0
+Kr_max: 5000.0
+hr_min: 0.1
+hr_max: 0.45
+f0_min: 0.1
+f0_max: 0.45
+f1_min: 1.0
+f1_max: 4.0
+A_min: 0.09
+A_max: 0.12
+x_r_start_min: 0.35
+x_r_start_max: 0.4
+y_error_scale_m: 0.01
+x_constraint_scale_m: 0.005
+lambda_constraint: 10.0
+lambda_uncertainty_peak_y: 0.05
+lambda_uncertainty_max_abs_xr: 0.1
+beta_constraint_std: 0.5
+n_optimization_attempts: 5
+top_k_validate_per_attempt: 5
+de_strategy: best1bin
+de_maxiter: 120
+de_popsize: 18
+de_tol: 1e-07
+de_mutation: (0.5, 1.0)
+de_recombination: 0.7
+de_polish: True
+de_workers: 1
+de_updating: immediate
+run_uncertainty_diagnostics: True
+n_uncertainty_samples: 2500
+run_lambda_sweep: False
+lambda_sweep_values: (3.0, 5.0, 10.0)
+lambda_sweep_target: 0.75
+lambda_sweep_attempts: 2
+lambda_sweep_maxiter: 70
+lambda_sweep_popsize: 12
+run_beta_sweep: False
+beta_sweep_values: (0.0, 0.5, 1.0, 1.96)
+beta_sweep_targets: (0.65, 0.75)
+beta_sweep_attempts: 2
+beta_sweep_maxiter: 70
+beta_sweep_popsize: 12

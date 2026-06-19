@@ -1,0 +1,20 @@
+NN v2 multi-output ensemble surrogate
+==================================================
+Dataset: C:\Users\casaz\Desktop\Proj2\data\dataset_augmented.csv
+Results dir: C:\Users\casaz\Desktop\Proj2\results\nn_v2
+Inputs: ['Kb', 'Kr', 'Mb', 'hb', 'hr', 'f0', 'f1', 'A', 'x_r_start']
+Targets: ['peak_y', 'max_abs_xr']
+Architecture: 32-64-32
+Learning rate: 0.001
+Weight decay: 1e-05
+Selected lambda: 5.000
+Ensemble seeds: [42, 123, 2026]
+Ensemble models: 3
+
+Primary test metrics: ensemble
+peak_y RMSE: 15.502 mm
+max_abs_xr RMSE: 4.386 mm
+true-limit false feasible: 1.000%
+safety-margin false feasible: 0.167%
+
+The primary model for inverse optimization is the ensemble mean.

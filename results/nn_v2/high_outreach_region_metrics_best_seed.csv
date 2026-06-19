@@ -1,0 +1,3 @@
+region,n_samples,peak_y_rmse_mm,peak_y_mae_mm,max_abs_xr_rmse_mm,max_abs_xr_mae_mm,safety_margin_false_feasible_rate,safety_margin_unsafe_given_pred_safe_rate
+high_outreach_peak_ge_0p60,175,28.7028588161403,11.99186883215967,6.501088192462604,3.6951134501647918,0.0,0.0
+top_reachable_peak_ge_0p65,113,17.728587237809048,10.30549814693811,6.819676675135982,3.5579436824194834,0.0,0.0
