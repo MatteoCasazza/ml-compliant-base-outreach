@@ -393,19 +393,20 @@ def plot_augmentation_analysis(
     # ------------------------------------------------------------
     plt.figure(figsize=(10, 6))
 
-    plt.hist(
-        base_df["peak_y"],
-        bins=30,
-        alpha=0.6,
-        label="Uniform dataset",
-        edgecolor="black"
-    )
 
     plt.hist(
         merged_df["peak_y"],
         bins=30,
         alpha=0.5,
         label="Augmented dataset",
+        edgecolor="black"
+    )
+
+    plt.hist(
+        base_df["peak_y"],
+        bins=30,
+        alpha=0.6,
+        label="Uniform dataset",
         edgecolor="black"
     )
 
