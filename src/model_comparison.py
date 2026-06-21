@@ -23,7 +23,8 @@ Expected inputs
 results/gp/metrics.csv
 results/gp/test_prediction_errors.csv
 results/gp_constraints/metrics_max_abs_xr.csv
-results/nn/metrics.csv
+results/nn_v2/metrics.csv
+results/nn_v2/nn_multioutput_model.pt
 
 Optional inputs for inference timing
 ------------------------------------
@@ -94,7 +95,7 @@ FIGURES_DIR = PROJECT_ROOT / "figures"
 
 GP_RESULTS_DIR = RESULTS_DIR / "gp"
 GP_CONSTRAINT_RESULTS_DIR = RESULTS_DIR / "gp_constraints"
-NN_RESULTS_DIR = RESULTS_DIR / "nn"
+NN_RESULTS_DIR = RESULTS_DIR / "nn_v2"
 
 COMPARISON_RESULTS_DIR = RESULTS_DIR / "model_comparison"
 COMPARISON_FIGURES_DIR = FIGURES_DIR / "model_comparison"
@@ -255,6 +256,53 @@ def compute_gp_peak_high_outreach_metrics() -> Dict[str, float]:
     }
 
 
+def compute_nn_peak_high_outreach_metrics() -> Dict[str, float]:
+    """
+    Compute high-outreach peak_y metrics from the NN v2 test prediction table.
+
+    This is more robust than reading them from metrics.csv because the NN v2
+    script saves detailed high-outreach diagnostics in separate files and the
+    main metrics.csv may not always contain flattened high-outreach columns.
+    """
+    pred_path = NN_RESULTS_DIR / "test_predictions.csv"
+
+    if not pred_path.exists():
+        return {
+            "peak_y_high_outreach_n": np.nan,
+            "peak_y_high_outreach_rmse_mm": np.nan,
+            "peak_y_high_outreach_mae_mm": np.nan,
+        }
+
+    df = pd.read_csv(pred_path)
+
+    required = {"true_peak_y", "pred_peak_y"}
+    if not required.issubset(df.columns):
+        return {
+            "peak_y_high_outreach_n": np.nan,
+            "peak_y_high_outreach_rmse_mm": np.nan,
+            "peak_y_high_outreach_mae_mm": np.nan,
+        }
+
+    mask = df["true_peak_y"] > HIGH_OUTREACH_THRESHOLD
+
+    if not mask.any():
+        return {
+            "peak_y_high_outreach_n": 0,
+            "peak_y_high_outreach_rmse_mm": np.nan,
+            "peak_y_high_outreach_mae_mm": np.nan,
+        }
+
+    y_true = df.loc[mask, "true_peak_y"].to_numpy(dtype=float)
+    y_pred = df.loc[mask, "pred_peak_y"].to_numpy(dtype=float)
+    error = y_pred - y_true
+
+    return {
+        "peak_y_high_outreach_n": int(mask.sum()),
+        "peak_y_high_outreach_rmse_mm": float(np.sqrt(np.mean(error ** 2)) * 1000.0),
+        "peak_y_high_outreach_mae_mm": float(np.mean(np.abs(error)) * 1000.0),
+    }
+
+
 def collect_metrics() -> pd.DataFrame:
     """
     Collect metrics from GP and NN result files into one comparison table.
@@ -267,6 +315,7 @@ def collect_metrics() -> pd.DataFrame:
     nn_metrics = read_single_row_csv(NN_RESULTS_DIR / "metrics.csv", "NN metrics")
 
     gp_high = compute_gp_peak_high_outreach_metrics()
+    nn_high = compute_nn_peak_high_outreach_metrics()
 
     rows = []
 
@@ -317,15 +366,9 @@ def collect_metrics() -> pd.DataFrame:
             "peak_y_rmse_mm": get_value(nn_metrics, ["test_peak_y_rmse_mm"]),
             "peak_y_mae_mm": get_value(nn_metrics, ["test_peak_y_mae_mm"]),
             "peak_y_r2": get_value(nn_metrics, ["test_peak_y_r2"]),
-            "peak_y_high_outreach_n": get_value(nn_metrics, ["test_high_outreach_n_samples"]),
-            "peak_y_high_outreach_rmse_mm": get_value(
-                nn_metrics,
-                ["test_high_outreach_peak_y_rmse_mm"],
-            ),
-            "peak_y_high_outreach_mae_mm": get_value(
-                nn_metrics,
-                ["test_high_outreach_peak_y_mae_mm"],
-            ),
+            "peak_y_high_outreach_n": nn_high["peak_y_high_outreach_n"],
+            "peak_y_high_outreach_rmse_mm": nn_high["peak_y_high_outreach_rmse_mm"],
+            "peak_y_high_outreach_mae_mm": nn_high["peak_y_high_outreach_mae_mm"],
             "max_abs_xr_rmse_mm": get_value(nn_metrics, ["test_max_abs_xr_rmse_mm"]),
             "max_abs_xr_mae_mm": get_value(nn_metrics, ["test_max_abs_xr_mae_mm"]),
             "max_abs_xr_r2": get_value(nn_metrics, ["test_max_abs_xr_r2"]),
@@ -895,7 +938,7 @@ def benchmark_function(func, repeats: int = INFERENCE_REPEATS, warmup: int = INF
 
 def load_nn_for_timing():
     """
-    Load the trained NN and scalers for timing.
+    Load the trained NN v2 ensemble and scalers for timing.
     """
     if not TORCH_AVAILABLE:
         raise RuntimeError("PyTorch is not available.")
@@ -905,7 +948,9 @@ def load_nn_for_timing():
     scaler_y_path = NN_RESULTS_DIR / "scaler_Y.pkl"
 
     if not model_path.exists() or not scaler_x_path.exists() or not scaler_y_path.exists():
-        raise FileNotFoundError("NN model or scalers not found. Run src/model_nn.py first.")
+        raise FileNotFoundError(
+            "NN v2 model or scalers not found. Run src/model_nn_v2.py first."
+        )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -914,18 +959,32 @@ def load_nn_for_timing():
     except TypeError:
         checkpoint = torch.load(model_path, map_location=device)
 
-    model = MultiOutputMLP(
-        input_dim=len(checkpoint["input_columns"]),
-        hidden_layers=checkpoint["hidden_layers"],
-        output_dim=len(checkpoint["target_columns"]),
-    ).to(device)
-    model.load_state_dict(checkpoint["model_state_dict"])
-    model.eval()
-
     scaler_X = joblib.load(scaler_x_path)
     scaler_Y = joblib.load(scaler_y_path)
 
-    return model, scaler_X, scaler_Y, device
+    hidden_layers = checkpoint["hidden_layers"]
+    input_dim = len(checkpoint["input_columns"])
+    output_dim = len(checkpoint["target_columns"])
+
+    state_dicts = checkpoint.get("ensemble_state_dicts", None)
+
+    if state_dicts is None:
+        state_dicts = [checkpoint["model_state_dict"]]
+
+    models = []
+
+    for state_dict in state_dicts:
+        model = MultiOutputMLP(
+            input_dim=input_dim,
+            hidden_layers=hidden_layers,
+            output_dim=output_dim,
+        ).to(device)
+
+        model.load_state_dict(state_dict)
+        model.eval()
+        models.append(model)
+
+    return models, scaler_X, scaler_Y, device
 
 
 def run_inference_benchmark() -> pd.DataFrame:
@@ -998,7 +1057,7 @@ def run_inference_benchmark() -> pd.DataFrame:
     if not nn_available:
         print("⚠️  NN model/scalers not found or PyTorch unavailable. Skipping NN inference benchmark.")
     else:
-        nn_model, nn_scaler_X, nn_scaler_Y, nn_device = load_nn_for_timing()
+        nn_models, nn_scaler_X, nn_scaler_Y, nn_device = load_nn_for_timing()
 
     for batch_size in INFERENCE_BATCH_SIZES:
         X_batch = make_benchmark_batch(X, batch_size)
@@ -1035,9 +1094,16 @@ def run_inference_benchmark() -> pd.DataFrame:
             def nn_predict():
                 X_scaled = nn_scaler_X.transform(X_batch)
                 X_tensor = torch.tensor(X_scaled, dtype=torch.float32, device=nn_device)
+
                 with torch.no_grad():
-                    pred_scaled = nn_model(X_tensor).cpu().numpy()
+                    pred_scaled_all = [
+                        model(X_tensor).cpu().numpy()
+                        for model in nn_models
+                    ]
+
+                pred_scaled = np.mean(pred_scaled_all, axis=0)
                 pred = nn_scaler_Y.inverse_transform(pred_scaled)
+
                 return pred
 
             mean_ms, std_ms = benchmark_function(nn_predict)
