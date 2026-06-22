@@ -1,44 +1,65 @@
-
 """
-learning_curve_gp_vs_nn_final.py
-================================
+learning_curve_gp_vs_nn.py
+==========================
 
-Learning-curve comparison between the final selected surrogate configurations:
+Learning-curve comparison between:
+    1. GP pair: GP_peak_y + GP_max_abs_xr
+    2. NN multi-output: [peak_y, max_abs_xr]
 
-1. GP pair:
-   - GP_peak_y: Matérn 5/2, alpha = 1e-6
-   - GP_max_abs_xr: Matérn 3/2, alpha = 1e-6
+Goal
+----
+Evaluate how surrogate accuracy changes as the number of training samples
+increases. The test set is fixed for all experiments, so GP and NN are compared
+fairly at the same training-set sizes.
 
-2. NN multi-output:
-   - Architecture: [32, 64, 32]
-   - Weighted loss: MSE(peak_y) + lambda * MSE(max_abs_xr), lambda = 5
-   - Ensemble seeds: [42, 123, 2026]
+Mappings
+--------
+Inputs:
+    [Kb, Kr, Mb, hb, hr, f0, f1, A, x_r_start]
 
-The test set is fixed for all experiments. For each training size, both
-surrogate families are trained using the same training subset and evaluated
-on the same fixed test set.
+Targets:
+    peak_y
+    max_abs_xr
+
+Outputs
+-------
+results/learning_curve/
+    gp_vs_nn_learning_curve.csv
+    gp_vs_nn_learning_curve_report_table.csv
+
+figures/learning_curve/
+    gp_vs_nn_peak_y_rmse.png
+    gp_vs_nn_max_abs_xr_rmse.png
+    gp_vs_nn_r2.png
+    gp_vs_nn_constraint_safety.png
+    gp_vs_nn_training_time.png
+    gp_vs_nn_learning_curve_summary.png
+
+Author: MatteoCasazza
+Date: 2026
 """
 
 from __future__ import annotations
 
-import random
 import time
 import warnings
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-import matplotlib.pyplot as plt
+import joblib
 import numpy as np
 import pandas as pd
-import torch
-import torch.nn as nn
+import matplotlib.pyplot as plt
+
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.gaussian_process import GaussianProcessRegressor
-from sklearn.gaussian_process.kernels import ConstantKernel as C
-from sklearn.gaussian_process.kernels import Matern, WhiteKernel
+from sklearn.gaussian_process.kernels import ConstantKernel as C, Matern, WhiteKernel
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
+
+import torch
+import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
 
@@ -61,41 +82,52 @@ FIGURES_DIR.mkdir(parents=True, exist_ok=True)
 # ============================================================================
 
 INPUT_COLUMNS = [
-    "Kb", "Kr", "Mb", "hb", "hr", "f0", "f1", "A", "x_r_start",
+    "Kb",
+    "Kr",
+    "Mb",
+    "hb",
+    "hr",
+    "f0",
+    "f1",
+    "A",
+    "x_r_start",
 ]
-TARGET_COLUMNS = ["peak_y", "max_abs_xr"]
 
+TARGET_COLUMNS = ["peak_y", "max_abs_xr"]
 PEAK_COL = "peak_y"
 MAX_ABS_XR_COL = "max_abs_xr"
 
 TEST_SIZE = 0.20
 RANDOM_STATE = 42
 
+# With the current 1600-sample dataset, the 80% train pool contains 1280 samples.
 # Values larger than the available train pool are automatically skipped.
 TRAIN_SIZES = [200, 400, 800, 1200, 1600, 2000, 2400]
 
-# GP final selected kernel/alpha configurations.
+# GP settings: final selected configurations from GP cross-validation.
 GP_ALPHA_PEAK_Y = 1e-6
 GP_ALPHA_MAX_ABS_XR = 1e-6
-GP_KERNEL_PEAK_Y = "matern52"
-GP_KERNEL_MAX_ABS_XR = "matern32"
+GP_N_RESTARTS = 1   # keep small for learning curves; final models use more restarts
 GP_LENGTH_SCALE_BOUNDS = (1e-2, 1e3)
 
-# Set to 3 to match the final GP scripts exactly.
-# Set to 1 to keep the repeated learning-curve runs faster.
-GP_N_RESTARTS = 1
+GP_KERNEL_PEAK_Y = "matern52"
+GP_KERNEL_MAX_ABS_XR = "matern32"
 
-# NN final selected configuration.
+# NN settings: final selected NN v2 configuration.
 NN_HIDDEN_LAYERS = [32, 64, 32]
 NN_LR = 1e-3
 NN_WEIGHT_DECAY = 1e-5
 NN_CONSTRAINT_LOSS_WEIGHT = 5.0
+
 NN_BATCH_SIZE = 64
 NN_MAX_EPOCHS = 1500
 NN_PATIENCE = 120
 NN_VAL_FRACTION_FROM_TRAIN_POOL = 0.15
+
+# Final ensemble seeds.
 NN_SEEDS = [42, 123, 2026]
 
+# Learning-rate scheduler, same logic as NN v2.
 USE_LR_SCHEDULER = True
 SCHEDULER_FACTOR = 0.5
 SCHEDULER_PATIENCE = 40
@@ -116,6 +148,8 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def set_seed(seed: int) -> None:
     """Set deterministic random seeds."""
+    import random
+
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -125,7 +159,6 @@ def set_seed(seed: int) -> None:
 
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-
 
 def load_dataset() -> Tuple[np.ndarray, np.ndarray, pd.DataFrame]:
     """Load final augmented dataset."""
@@ -141,8 +174,8 @@ def load_dataset() -> Tuple[np.ndarray, np.ndarray, pd.DataFrame]:
 
     df = df.dropna(subset=required_cols).reset_index(drop=True)
 
-    X = df[INPUT_COLUMNS].to_numpy(dtype=np.float64)
-    Y = df[TARGET_COLUMNS].to_numpy(dtype=np.float64)
+    X = df[INPUT_COLUMNS].values.astype(np.float64)
+    Y = df[TARGET_COLUMNS].values.astype(np.float64)
 
     return X, Y, df
 
@@ -213,7 +246,7 @@ def safety_margin_metrics(
     opt_limit: float = ROBOT_LIMIT_OPT,
 ) -> Dict[str, float]:
     """
-    Compute safety-margin false feasible metrics.
+    Compute the safety-margin false-feasible metric.
 
     Unsafe accepted means:
         predicted safe under optimization margin: y_pred <= 0.495
@@ -299,13 +332,23 @@ def high_outreach_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, f
 # ============================================================================
 
 def create_gp(n_dims: int, target_name: str) -> GaussianProcessRegressor:
-    """Create a GP using the final selected kernel for each target."""
+    """
+    Create a GP using the final selected kernel for each target.
+
+    GP_peak_y:
+        Matérn 5/2, alpha = 1e-6
+
+    GP_max_abs_xr:
+        Matérn 3/2, alpha = 1e-6
+    """
     if target_name == "peak_y":
         nu = 2.5
         alpha = GP_ALPHA_PEAK_Y
+        kernel_label = GP_KERNEL_PEAK_Y
     elif target_name == "max_abs_xr":
         nu = 1.5
         alpha = GP_ALPHA_MAX_ABS_XR
+        kernel_label = GP_KERNEL_MAX_ABS_XR
     else:
         raise ValueError(f"Unknown target name: {target_name}")
 
@@ -319,13 +362,15 @@ def create_gp(n_dims: int, target_name: str) -> GaussianProcessRegressor:
         + WhiteKernel(noise_level=1e-5, noise_level_bounds=(1e-10, 1e-1))
     )
 
-    return GaussianProcessRegressor(
+    gp = GaussianProcessRegressor(
         kernel=kernel,
         alpha=alpha,
         normalize_y=False,
         n_restarts_optimizer=GP_N_RESTARTS,
         random_state=RANDOM_STATE,
     )
+
+    return gp
 
 
 def train_gp_pair(
@@ -402,9 +447,9 @@ def train_gp_pair(
 # ============================================================================
 
 class MultiOutputNN(nn.Module):
-    """Feed-forward multi-output neural network."""
+    """Simple feed-forward multi-output neural network."""
 
-    def __init__(self, input_dim: int, hidden_layers: List[int], output_dim: int = 2) -> None:
+    def __init__(self, input_dim: int, hidden_layers: List[int], output_dim: int = 2):
         super().__init__()
 
         layers: List[nn.Module] = []
@@ -421,13 +466,17 @@ class MultiOutputNN(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
 
-
 def weighted_multioutput_mse(
     pred: torch.Tensor,
     target: torch.Tensor,
     constraint_loss_weight: float = NN_CONSTRAINT_LOSS_WEIGHT,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Weighted MSE on standardized outputs."""
+    """
+    Weighted MSE on standardized outputs.
+
+    Output 0: peak_y
+    Output 1: max_abs_xr
+    """
     per_output_loss = torch.mean((pred - target) ** 2, dim=0)
     total_loss = per_output_loss[0] + constraint_loss_weight * per_output_loss[1]
     return total_loss, per_output_loss
@@ -478,7 +527,7 @@ def train_one_nn(
     model = MultiOutputNN(
         input_dim=X_train.shape[1],
         hidden_layers=NN_HIDDEN_LAYERS,
-        output_dim=len(TARGET_COLUMNS),
+        output_dim=2,
     ).to(DEVICE)
 
     optimizer = torch.optim.Adam(
@@ -486,7 +535,7 @@ def train_one_nn(
         lr=NN_LR,
         weight_decay=NN_WEIGHT_DECAY,
     )
-
+    
     scheduler = None
     if USE_LR_SCHEDULER:
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -511,9 +560,9 @@ def train_one_nn(
             xb = xb.to(DEVICE)
             yb = yb.to(DEVICE)
 
-            optimizer.zero_grad(set_to_none=True)
+            optimizer.zero_grad()
             pred = model(xb)
-            loss, _ = weighted_multioutput_mse(
+            loss, per_output_loss = weighted_multioutput_mse(
                 pred,
                 yb,
                 constraint_loss_weight=NN_CONSTRAINT_LOSS_WEIGHT,
@@ -521,7 +570,7 @@ def train_one_nn(
             loss.backward()
             optimizer.step()
 
-            train_losses.append(float(loss.detach().cpu()))
+            train_losses.append(loss.item())
 
         model.eval()
         with torch.no_grad():
@@ -531,24 +580,21 @@ def train_one_nn(
                 Y_val_t,
                 constraint_loss_weight=NN_CONSTRAINT_LOSS_WEIGHT,
             )
-            val_loss = float(val_loss_tensor.detach().cpu())
-            val_mse_per_output = val_mse_per_output_tensor.detach().cpu().numpy()
+            val_loss = float(val_loss_tensor.cpu())
+            val_mse_per_output = val_mse_per_output_tensor.cpu().numpy()
 
         train_loss = float(np.mean(train_losses))
-        current_lr = float(optimizer.param_groups[0]["lr"])
 
-        history_rows.append(
-            {
-                "epoch": epoch,
-                "seed": seed,
-                "learning_rate": current_lr,
-                "constraint_loss_weight": NN_CONSTRAINT_LOSS_WEIGHT,
-                "train_loss": train_loss,
-                "val_loss": val_loss,
-                "val_peak_y_loss": float(val_mse_per_output[0]),
-                "val_max_abs_xr_loss": float(val_mse_per_output[1]),
-            }
-        )
+        history_rows.append({
+            "epoch": epoch,
+            "seed": seed,
+            "learning_rate": float(optimizer.param_groups[0]["lr"]),
+            "constraint_loss_weight": NN_CONSTRAINT_LOSS_WEIGHT,
+            "train_loss": train_loss,
+            "val_loss": val_loss,
+            "val_peak_y_loss": float(val_mse_per_output[0]),
+            "val_max_abs_xr_loss": float(val_mse_per_output[1]),
+        })
 
         if val_loss < best_val_loss - 1e-8:
             best_val_loss = val_loss
@@ -557,9 +603,6 @@ def train_one_nn(
             patience_counter = 0
         else:
             patience_counter += 1
-
-        if scheduler is not None:
-            scheduler.step(val_loss)
 
         if patience_counter >= NN_PATIENCE:
             break
@@ -570,7 +613,7 @@ def train_one_nn(
     model.eval()
     with torch.no_grad():
         X_test_t = torch.tensor(X_test_scaled, dtype=torch.float32, device=DEVICE)
-        Y_pred_scaled = model(X_test_t).detach().cpu().numpy()
+        Y_pred_scaled = model(X_test_t).cpu().numpy()
 
     Y_pred = scaler_Y.inverse_transform(Y_pred_scaled)
     elapsed = time.time() - start_time
@@ -611,7 +654,7 @@ def train_nn_multi_seed(
     X_test: np.ndarray,
     Y_test: np.ndarray,
 ) -> Tuple[Dict[str, float], np.ndarray, pd.DataFrame]:
-    """Train NN over multiple seeds and aggregate metrics on the ensemble mean."""
+    """Train NN over one or more seeds and aggregate metrics."""
     seed_metrics = []
     seed_predictions = []
     histories = []
@@ -630,15 +673,17 @@ def train_nn_multi_seed(
 
     metrics_df = pd.DataFrame(seed_metrics)
 
-    # Final NN prediction is the ensemble mean.
+    # Average predictions over seeds. With NN_SEEDS=[42], this is just the single model.
     Y_pred_mean = np.mean(seed_predictions, axis=0)
 
+    # Recompute metrics on averaged predictions.
     peak_reg = regression_metrics(Y_test[:, 0], Y_pred_mean[:, 0])
     max_reg = regression_metrics(Y_test[:, 1], Y_pred_mean[:, 1])
     clf = constraint_metrics(Y_test[:, 1], Y_pred_mean[:, 1])
-    safety = safety_margin_metrics(Y_test[:, 1], Y_pred_mean[:, 1])
     nb = near_boundary_metrics(Y_test[:, 1], Y_pred_mean[:, 1])
     high = high_outreach_metrics(Y_test[:, 0], Y_pred_mean[:, 0])
+
+    safety = safety_margin_metrics(Y_test[:, 1], Y_pred[:, 1])
 
     metrics = {
         "model": "NN multi-output",
@@ -652,10 +697,10 @@ def train_nn_multi_seed(
         **clf,
         **safety,
         **nb,
-        "training_time_s": float(metrics_df["training_time_s"].sum()),
-        "best_epoch_mean": float(metrics_df["best_epoch"].mean()),
-        "best_val_loss_mean": float(metrics_df["best_val_loss"].mean()),
-        "n_seeds": len(NN_SEEDS),
+        "training_time_s": elapsed,
+        "best_epoch": best_epoch,
+        "best_val_loss": best_val_loss,
+        "seed": seed,
         "nn_architecture": "-".join(map(str, NN_HIDDEN_LAYERS)),
         "nn_constraint_loss_weight": NN_CONSTRAINT_LOSS_WEIGHT,
     }
@@ -693,15 +738,9 @@ def run_learning_curve(X: np.ndarray, Y: np.ndarray) -> pd.DataFrame:
     print(f"Fixed test samples:        {len(X_test)}")
     print(f"Train pool samples:        {len(X_train_pool)}")
     print(f"Training sizes:            {valid_train_sizes}")
-    print(f"GP peak_y kernel:          {GP_KERNEL_PEAK_Y}")
-    print(f"GP max_abs_xr kernel:      {GP_KERNEL_MAX_ABS_XR}")
-    print(f"GP alpha peak_y:           {GP_ALPHA_PEAK_Y:.0e}")
-    print(f"GP alpha max_abs_xr:       {GP_ALPHA_MAX_ABS_XR:.0e}")
     print(f"GP restarts:               {GP_N_RESTARTS}")
     print(f"NN hidden layers:          {NN_HIDDEN_LAYERS}")
-    print(f"NN lr / weight decay:      {NN_LR:.0e} / {NN_WEIGHT_DECAY:.0e}")
-    print(f"NN constraint lambda:      {NN_CONSTRAINT_LOSS_WEIGHT:g}")
-    print(f"NN scheduler:              {USE_LR_SCHEDULER}")
+    print(f"NN lr / weight decay:      {NN_LR} / {NN_WEIGHT_DECAY}")
     print(f"NN seeds:                  {NN_SEEDS}")
     print("=" * 70)
 
@@ -733,7 +772,6 @@ def run_learning_curve(X: np.ndarray, Y: np.ndarray) -> pd.DataFrame:
             f"  GP | peak_y RMSE {gp_metrics['peak_y_rmse_mm']:.2f} mm | "
             f"max_abs_xr RMSE {gp_metrics['max_abs_xr_rmse_mm']:.2f} mm | "
             f"false feasible {gp_metrics['false_feasible_percent']:.2f}% | "
-            f"safety-margin false feasible {gp_metrics['safety_margin_false_feasible_percent']:.2f}% | "
             f"time {gp_metrics['training_time_s']:.1f} s"
         )
 
@@ -756,33 +794,25 @@ def run_learning_curve(X: np.ndarray, Y: np.ndarray) -> pd.DataFrame:
             f"  NN | peak_y RMSE {nn_metrics['peak_y_rmse_mm']:.2f} mm | "
             f"max_abs_xr RMSE {nn_metrics['max_abs_xr_rmse_mm']:.2f} mm | "
             f"false feasible {nn_metrics['false_feasible_percent']:.2f}% | "
-            f"safety-margin false feasible {nn_metrics['safety_margin_false_feasible_percent']:.2f}% | "
             f"time {nn_metrics['training_time_s']:.1f} s"
         )
 
         elapsed = time.time() - global_start
         print(f"\nElapsed total: {elapsed / 60:.1f} min")
 
+        # Checkpoint after each training size.
         checkpoint_df = pd.DataFrame(all_rows)
-        checkpoint_df.to_csv(
-            RESULTS_DIR / "gp_vs_nn_learning_curve_checkpoint.csv",
-            index=False,
-        )
+        checkpoint_df.to_csv(RESULTS_DIR / "gp_vs_nn_learning_curve_checkpoint.csv", index=False)
 
     results_df = pd.DataFrame(all_rows)
 
     if all_histories:
         histories_df = pd.concat(all_histories, ignore_index=True)
-        histories_df.to_csv(
-            RESULTS_DIR / "gp_vs_nn_learning_curve_nn_histories.csv",
-            index=False,
-        )
+        histories_df.to_csv(RESULTS_DIR / "gp_vs_nn_learning_curve_nn_histories.csv", index=False)
 
+    # Save fixed test-set metadata.
     test_df = pd.DataFrame(Y_test, columns=["true_peak_y", "true_max_abs_xr"])
-    test_df.to_csv(
-        RESULTS_DIR / "gp_vs_nn_learning_curve_fixed_test_targets.csv",
-        index=False,
-    )
+    test_df.to_csv(RESULTS_DIR / "gp_vs_nn_learning_curve_fixed_test_targets.csv", index=False)
 
     return results_df
 
@@ -803,10 +833,8 @@ def make_report_table(results_df: pd.DataFrame) -> pd.DataFrame:
         "max_abs_xr_r2",
         "constraint_accuracy_percent",
         "false_feasible_percent",
-        "safety_margin_false_feasible_percent",
         "near_boundary_rmse_mm",
         "near_boundary_false_feasible_percent",
-        "near_boundary_safety_margin_false_feasible_percent",
         "training_time_s",
     ]
 
@@ -822,10 +850,8 @@ def make_report_table(results_df: pd.DataFrame) -> pd.DataFrame:
         "max_abs_xr_r2": "max_abs_xr R2",
         "constraint_accuracy_percent": "Constraint accuracy [%]",
         "false_feasible_percent": "False feasible [%]",
-        "safety_margin_false_feasible_percent": "Safety-margin false feasible [%]",
         "near_boundary_rmse_mm": "Near-boundary RMSE [mm]",
         "near_boundary_false_feasible_percent": "Near-boundary false feasible [%]",
-        "near_boundary_safety_margin_false_feasible_percent": "NB safety-margin false feasible [%]",
         "training_time_s": "Training time [s]",
     }
 
@@ -895,6 +921,7 @@ def generate_plots(results_df: pd.DataFrame) -> None:
         filename="gp_vs_nn_max_abs_xr_rmse.png",
     )
 
+    # R2 figure with two axes.
     fig, axes = plt.subplots(1, 2, figsize=(15, 6))
 
     for ax, metric_col, title in [
@@ -903,13 +930,7 @@ def generate_plots(results_df: pd.DataFrame) -> None:
     ]:
         for model_name in ["GP pair", "NN multi-output"]:
             sub = results_df[results_df["model"] == model_name].sort_values("n_train")
-            ax.plot(
-                sub["n_train"],
-                sub[metric_col],
-                marker="o",
-                linewidth=2,
-                label=model_name,
-            )
+            ax.plot(sub["n_train"], sub[metric_col], marker="o", linewidth=2, label=model_name)
 
         ax.set_xlabel("Training samples")
         ax.set_ylabel("R²")
@@ -935,44 +956,26 @@ def generate_plots(results_df: pd.DataFrame) -> None:
 
     plot_metric_line(
         results_df,
-        metric_col="safety_margin_false_feasible_percent",
-        ylabel="Safety-margin false feasible rate [%]",
-        title="Learning Curve: Safety-Margin Constraint Error",
-        filename="gp_vs_nn_safety_margin_false_feasible.png",
-    )
-
-    plot_metric_line(
-        results_df,
         metric_col="training_time_s",
         ylabel="Training time [s]",
         title="Training Time vs Dataset Size",
         filename="gp_vs_nn_training_time.png",
     )
 
+    # Summary 2x2 figure.
     fig, axes = plt.subplots(2, 2, figsize=(16, 11))
 
     plot_specs = [
         (axes[0, 0], "peak_y_rmse_mm", "peak_y RMSE [mm]", "Outreach prediction"),
         (axes[0, 1], "max_abs_xr_rmse_mm", "max_abs_xr RMSE [mm]", "Constraint prediction"),
-        (
-            axes[1, 0],
-            "safety_margin_false_feasible_percent",
-            "Safety-margin false feasible [%]",
-            "Constraint safety",
-        ),
+        (axes[1, 0], "false_feasible_percent", "False feasible [%]", "Constraint safety"),
         (axes[1, 1], "training_time_s", "Training time [s]", "Training cost"),
     ]
 
     for ax, metric_col, ylabel, title in plot_specs:
         for model_name in ["GP pair", "NN multi-output"]:
             sub = results_df[results_df["model"] == model_name].sort_values("n_train")
-            ax.plot(
-                sub["n_train"],
-                sub[metric_col],
-                marker="o",
-                linewidth=2,
-                label=model_name,
-            )
+            ax.plot(sub["n_train"], sub[metric_col], marker="o", linewidth=2, label=model_name)
 
         ax.set_xlabel("Training samples")
         ax.set_ylabel(ylabel)
@@ -1003,23 +1006,10 @@ def save_interpretation(results_df: pd.DataFrame) -> Path:
     lines.append(f"Fixed test fraction: {TEST_SIZE}")
     lines.append(f"Training sizes: {sorted(results_df['n_train'].unique().tolist())}")
     lines.append("")
-    lines.append("Model configurations:")
-    lines.append(f"  GP_peak_y: Matérn 5/2, alpha={GP_ALPHA_PEAK_Y:.0e}")
-    lines.append(f"  GP_max_abs_xr: Matérn 3/2, alpha={GP_ALPHA_MAX_ABS_XR:.0e}")
-    lines.append(f"  GP optimizer restarts in learning curve: {GP_N_RESTARTS}")
-    lines.append(
-        f"  NN: hidden layers={NN_HIDDEN_LAYERS}, "
-        f"lambda={NN_CONSTRAINT_LOSS_WEIGHT:g}, seeds={NN_SEEDS}"
-    )
-    lines.append("")
 
     largest_n = int(results_df["n_train"].max())
-    final_gp = results_df[
-        (results_df["n_train"] == largest_n) & (results_df["model"] == "GP pair")
-    ].iloc[0]
-    final_nn = results_df[
-        (results_df["n_train"] == largest_n) & (results_df["model"] == "NN multi-output")
-    ].iloc[0]
+    final_gp = results_df[(results_df["n_train"] == largest_n) & (results_df["model"] == "GP pair")].iloc[0]
+    final_nn = results_df[(results_df["n_train"] == largest_n) & (results_df["model"] == "NN multi-output")].iloc[0]
 
     lines.append(f"Largest training size: {largest_n}")
     lines.append("")
@@ -1036,29 +1026,18 @@ def save_interpretation(results_df: pd.DataFrame) -> Path:
         f"  GP false feasible: {final_gp['false_feasible_percent']:.2f}% | "
         f"NN false feasible: {final_nn['false_feasible_percent']:.2f}%"
     )
-    lines.append(
-        f"  GP safety-margin false feasible: "
-        f"{final_gp['safety_margin_false_feasible_percent']:.2f}% | "
-        f"NN safety-margin false feasible: "
-        f"{final_nn['safety_margin_false_feasible_percent']:.2f}%"
-    )
     lines.append("")
 
     lines.append("Interpretation guide:")
-    lines.append(
-        "  The main fair comparison is always performed at the same training size "
-        "and on the same fixed test set."
-    )
     lines.append(
         "  If GP error saturates while NN error keeps decreasing, the GP is more "
         "sample-efficient for the current dataset, while the NN may benefit more "
         "from additional simulations."
     )
     lines.append(
-        "  Since GP_N_RESTARTS may be reduced here for computational feasibility, "
-        "the learning curve should be interpreted as a controlled sample-efficiency "
-        "analysis. The final model comparison should still be based on the fully "
-        "trained final surrogates."
+        "  The main fair comparison is always performed at the same training size. "
+        "A comparison such as GP with 1600 samples vs NN with 3000 samples can be "
+        "reported only as a practical engineering trade-off, not as a fair model comparison."
     )
 
     path = RESULTS_DIR / "gp_vs_nn_learning_curve_interpretation.txt"
@@ -1096,6 +1075,7 @@ def main() -> None:
         markdown_text = report_df.to_string(index=False)
 
     md_path.write_text(markdown_text, encoding="utf-8")
+    
     print(f"✓ Markdown report table saved: {md_path}")
 
     print("\nLEARNING CURVE REPORT TABLE")
@@ -1118,10 +1098,9 @@ def main() -> None:
     print(f"  {FIGURES_DIR / 'gp_vs_nn_max_abs_xr_rmse.png'}")
     print(f"  {FIGURES_DIR / 'gp_vs_nn_r2.png'}")
     print(f"  {FIGURES_DIR / 'gp_vs_nn_constraint_safety.png'}")
-    print(f"  {FIGURES_DIR / 'gp_vs_nn_safety_margin_false_feasible.png'}")
     print(f"  {FIGURES_DIR / 'gp_vs_nn_training_time.png'}")
     print(f"  {FIGURES_DIR / 'gp_vs_nn_learning_curve_summary.png'}")
-    print("\nNext step: run the final surrogate model comparison.")
+    print("\nNext step: decide whether to keep the current dataset size or generate the final 3000-sample dataset.")
     print("=" * 70 + "\n")
 
 
