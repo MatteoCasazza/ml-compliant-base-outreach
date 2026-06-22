@@ -3,26 +3,26 @@ Gaussian Process Absolute Constraint Surrogate Model
 Target: max_abs_xr
 Constraint interpretation: max_abs_xr <= 0.5 m
 Input parameters: ['Kb', 'Kr', 'Mb', 'hb', 'hr', 'f0', 'f1', 'A', 'x_r_start']
-Kernel type: matern52
-Alpha: 1e-10
+Kernel type: matern32
+Alpha: 1e-06
 Optimizer restarts: 3
-Training time: 554.65 s
+Training time: 643.68 s
 
 Optimized kernel:
-27.5**2 * Matern(length_scale=[86.9, 16.6, 12.5, 132, 6.77, 1e+03, 4.71, 41, 304], nu=2.5) + WhiteKernel(noise_level=0.00248)
+31.6**2 * Matern(length_scale=[223, 68.8, 42.2, 287, 22.4, 1e+03, 19.7, 120, 641], nu=1.5) + WhiteKernel(noise_level=0.00138)
 
 Test regression metrics:
-R2:   0.995554
-RMSE: 0.003701 m (3.701 mm)
-MAE:  0.001768 m (1.768 mm)
+R2:   0.994890
+RMSE: 0.003968 m (3.968 mm)
+MAE:  0.001703 m (1.703 mm)
 
 Constraint classification, true limit:
-Accuracy: 99.00%
-False feasible: 0.33%
+Accuracy: 98.83%
+False feasible: 0.50%
 False infeasible: 0.67%
 
 Near-boundary metrics:
 Range: [0.480, 0.520] m
 Samples: 214
-RMSE: 2.169 mm
-False feasible: 0.93%
+RMSE: 1.959 mm
+False feasible: 1.40%

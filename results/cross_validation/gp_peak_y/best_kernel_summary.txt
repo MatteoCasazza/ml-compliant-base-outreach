@@ -1,0 +1,37 @@
+CROSS-VALIDATION SUMMARY: peak_y
+==========================================================================================
+
+Setup:
+  Dataset: C:\Users\casaz\Desktop\Proj2\data\dataset_augmented.csv
+  Target: peak_y
+  Output folder: C:\Users\casaz\Desktop\Proj2\results\cross_validation\gp_peak_y
+  Folds: 5
+  Optimizer restarts: 1
+  Kernels: RBF, Matern_3/2, Matern_5/2, RationalQuadratic
+  Alpha values: [1e-10, 1e-06]
+  High-outreach threshold: 0.600 m
+
+Recommended final configuration:
+  Kernel: Matern_5/2
+  Alpha: 1e-06
+  RMSE: 11.802 ± 1.279 mm
+  MAE: 6.034 ± 0.274 mm
+  R2: 0.98635 ± 0.00326
+  Mean predictive std: 10.693 mm
+  Mean LML: 1318.244
+  Convergence warnings: 5
+  High-outreach RMSE: 15.601 ± 4.336 mm
+
+Selection criterion:
+  The selected configuration minimizes global RMSE, then high-outreach RMSE, then convergence warnings, and finally maximizes LML.
+
+Compact report table:
+Target            Kernel Alpha  RMSE [mm]  RMSE std [mm]  MAE [mm]      R2  High RMSE [mm]  High RMSE std [mm]  Mean pred std [mm]      LML  Warnings  Total train time [min]  Rank
+peak_y        Matern_5/2 1e-06     11.802          1.279     6.034 0.98635          15.601               4.336              10.693 1318.244         5                   27.29     1
+peak_y        Matern_5/2 1e-10     12.229          0.695     6.241 0.98539          16.001               3.722              10.842 1267.769         4                   26.05     2
+peak_y        Matern_3/2 1e-06     12.391          1.417     6.070 0.98491          16.538               4.541              11.717 1282.216         7                   20.42     3
+peak_y        Matern_3/2 1e-10     12.392          1.417     6.070 0.98491          16.538               4.541              11.718 1282.216         7                   46.47     4
+peak_y               RBF 1e-10     12.817          1.878     6.823 0.98378          17.612               5.473              11.851 1111.568         0                   26.50     5
+peak_y               RBF 1e-06     12.817          1.878     6.823 0.98378          17.612               5.473              11.851 1111.568         0                   23.70     6
+peak_y RationalQuadratic 1e-06     16.510          2.437     9.216 0.97325          23.150               5.856              17.353  380.884         1                   16.63     7
+peak_y RationalQuadratic 1e-10     16.510          2.437     9.216 0.97325          23.150               5.856              17.353  380.884         0                   14.77     8
