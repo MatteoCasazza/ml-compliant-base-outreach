@@ -22,7 +22,7 @@ Run max_abs_xr only:
 Run both targets:
     python src/cross_validation_gp_parametric.py --target both
 
-Outputs
+Outputsuy 
 -------
 For peak_y:
     results/cross_validation/gp_peak_y/
