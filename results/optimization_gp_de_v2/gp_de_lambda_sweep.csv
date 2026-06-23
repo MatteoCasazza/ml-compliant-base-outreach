@@ -1,0 +1,4 @@
+method,target,sweep_lambda_constraint,lambda_constraint,beta_constraint_std,peak_y_true,target_error_mm,reachability_gap_mm,max_abs_xr_true,residual_margin_mm,constraint_violation_abs_mm,feasible_abs,peak_y_pred,max_abs_xr_pred,predicted_safety_violation_mm,surrogate_function_evaluations,optimization_time_s,sweep_n_attempts,sweep_maxiter,sweep_popsize
+GP_DE_lambda_sweep,0.75,3.0,3.0,0.5,0.6758,74.2,74.2,0.5014,-1.4,1.4,False,0.6781,0.4978,2.8,10224,31.8,2,70,12
+GP_DE_lambda_sweep,0.75,5.0,5.0,0.5,0.672,78.0,78.0,0.4986,1.4,0.0,True,0.6744,0.4941,0.0,10476,32.6,2,70,12
+GP_DE_lambda_sweep,0.75,10.0,10.0,0.5,0.668646,81.354,81.354,0.49553,4.47,0.0,True,0.6699,0.4928,0.0,10584,33.1,2,70,12
