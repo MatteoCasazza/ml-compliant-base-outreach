@@ -3,59 +3,45 @@
 ## 1. Problem Statement
 
 ## 2. Physics Model
-### 2.1 Two-Mass-Spring-Damper System
-### 2.2 Robot Workspace Constraint
-### 2.3 Chirp Excitation Input
-### 2.4 Simulation Outputs
+### 2.1 Dynamic System and Governing Equations
+### 2.2 Chirp Excitation
+### 2.3 Robot Workspace Constraint
 
 ## 3. Dataset Generation
-### 3.1 Uniform Dataset
+### 3.1 Uniform Dataset Design
 ### 3.2 Targeted Augmented Dataset
-### 3.3 Dataset Distribution Before and After Augmentation
-### 3.4 Dataset Statistics
-### 3.5 High-Outreach Feasible Region Analysis
+### 3.3 Augmentation effect and High-Outreach Feasible Region 
 
 ## 4. Surrogate Modeling and Comparison
-### 4.1 Surrogate Inputs and Outputs
-### 4.2 Gaussian Process Surrogate
-### 4.3 Neural Network Surrogate
-### 4.4 Learning Curve Analysis
-### 4.5 Surrogate Model Comparison
-### 4.6 ARD Feature Importance and Physical Interpretation
-### 4.7 Final Surrogate Selection
+### 4.1 Gaussian Process Surrogate
+### 4.2 Neural Network Surrogate
+### 4.3 Learning Curve Analysisand Surrogate Model Comparison
+### 4.4 ARD Feature Importance and Physical Interpretation
 
 ## 5. Constraint-Aware Inverse Optimization
-### 5.1 Target-Reaching Problem Formulation
-### 5.2 Common Physics-Based Objective Function
-### 5.3 Differential Evolution on the Selected Surrogate
-### 5.4 Neural Surrogate with Gradient-Based Optimization
-### 5.5 Bayesian Optimization with the True Simulator
-### 5.6 Optimization Strategy Comparison
+### 5.1 GP-Based Differential Evolution
+### 5.2 Neural Surrogate Gradient-Based Optimization
+### 5.3 Bayesian Optimization with the True Simulator
+### 5.4 Final Optimization Comparison and Simulator Validation
 
-## 6. Physical Validation
-### 6.1 Validation of DE Solutions
-### 6.2 Validation of NN + Gradient Descent Solutions
-### 6.3 Validation of BO Solutions
-### 6.4 Final Comparison on the True Simulator
+## 6. Physical Validation of Optimized Solutions
+### 6.1 Validation Protocol and Selected Targets
+### 6.2 Reachable Target Time-Response Validation
+### 6.3 Saturated Target Time-Response Validation
+### 6.4 Physical Interpretation of Constraint Saturation
 
-## 7. Sim-to-Real Robustness Considerations
-### 7.1 Model Mismatch and Parameter Uncertainty
-### 7.2 Link Between Validation and Robustness
+## 7. Sensitivity and Robustness Analysis
+### 7.1 One-at-a-Time Sensitivity Setup
+### 7.2 Reachable Target Sensitivity
+### 7.3 Saturated Target Sensitivity
+### 7.4 Monte Carlo Parameter-Uncertainty Setup
+### 7.5 Monte Carlo Robustness Results
+### 7.6 Robustness and Sim-to-Real Considerations
 
-## 8. Sensitivity Analysis
-### 8.1 One-at-a-Time Sensitivity
-### 8.2 Physical Interpretation of Parameter Effects
-
-## 9. Monte Carlo Robustness Analysis
-### 9.1 Parameter Uncertainty Setup
-### 9.2 Robustness of the Optimal Solution
-### 9.3 Feasibility Probability
-### 9.4 Success Rate Under Uncertainty
-
-## 10. Conclusions
-### 10.1 Main Findings
-### 10.2 Limitations
-### 10.3 Future Work
+## 8. Conclusions
+### 8.1 Main Findings
+### 8.2 Limitations
+### 8.3 Future Work
 
 ############################################################################
 Presentation Structure  NON AGGIORNATO
