@@ -31,12 +31,13 @@
 ### 6.4 Physical Interpretation of Constraint Saturation
 
 ## 7. Sensitivity and Robustness Analysis
-### 7.1 One-at-a-Time Sensitivity Setup
-### 7.2 Reachable Target Sensitivity
-### 7.3 Saturated Target Sensitivity
+### 7.1 Analysis Protocol and Reference Solutions
+### 7.2 One-at-a-Time Sensitivity Setup
+### 7.3 One-at-a-Time Sensitivity Results
 ### 7.4 Monte Carlo Parameter-Uncertainty Setup
 ### 7.5 Monte Carlo Robustness Results
 ### 7.6 Robustness and Sim-to-Real Considerations
+
 
 ## 8. Conclusions
 ### 8.1 Main Findings

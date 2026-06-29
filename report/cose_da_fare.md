@@ -2,7 +2,9 @@
 - appendice dataset correlation? (o nel capitolo ARD)
 - sistemare codice per visualizzazione gif sistema
 - gp_surface_Kr_hr_constraint_aware_target064  devo rifare questo grafico, è utile?
-- nella intro del capitolo optimizer mettere tabella dei dati input e bounds output
+- in generale in appendice mettere anche altre figure non messe nel report?
+- se ho tempo aggiustare organizzazione file bo codice (optimization _bo sembrerebbe inutile)
+
 
 
 - once finished, revised graphically all the report
