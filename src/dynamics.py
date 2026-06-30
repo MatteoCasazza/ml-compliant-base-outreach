@@ -1,130 +1,172 @@
 """
 dynamics.py
 ===========
-Two-degree-of-freedom system: controllable robot mounted on a compliant base.
 
-Coordinates:
-- x_b: passive base position
-- x_r: robot position relative to the base
-- y = x_b + x_r: total end-effector outreach
+Physics-based simulator for the two-degree-of-freedom compliant-base system.
 
-Input:
-- x_rd(t): commanded robot position, generated as a chirp excitation signal
+Coordinates
+-----------
+x_b : passive base position
+x_r : robot position relative to the base
+y   : total end-effector outreach, defined as y = x_b + x_r
 
-Main output:
-- peak_y: maximum total outreach reached during the simulation
+Input
+-----
+x_rd(t) : commanded robot position, generated as a linear chirp signal.
 
-This module is used as the physics-based simulator of the project.
-It generates the dynamic response of the system for a given set of physical
-and control parameters.
+Main output
+-----------
+peak_y : maximum total outreach reached during the simulation.
 
-Reference:
-Roveda et al. (2016) - Mechatronics 39
-Simplified model without external environment interaction.
+The model is a simplified version of the compliant-base robot system inspired by:
+Roveda et al. (2016), Mechatronics 39.
 
-Author: MatteoCasazza
+Author: Matteo Casazza
 Date: 2026
 """
 
-from pathlib import Path
+from __future__ import annotations
 
+from pathlib import Path
+from typing import Any, Mapping, Sequence
+
+import matplotlib.pyplot as plt
 import numpy as np
 from scipy.integrate import solve_ivp
-import matplotlib.pyplot as plt
 
 
-# Parameter order used when params are passed as an array.
-# This order must be consistent with dataset.py and models.py.
-PARAM_ORDER = ['Kb', 'Kr', 'Mb', 'hb', 'hr', 'f0', 'f1', 'A', 'x_r_start']
+# =============================================================================
+# GLOBAL SETTINGS
+# =============================================================================
+
+PARAM_ORDER = (
+    "Kb",
+    "Kr",
+    "Mb",
+    "hb",
+    "hr",
+    "f0",
+    "f1",
+    "A",
+    "x_r_start",
+)
+
+DEFAULT_ROBOT_MASS = 10.0
+DEFAULT_T_SIM = 60.0
+DEFAULT_DT = 0.001
+DEFAULT_ROBOT_LIMIT = 0.500
+DEFAULT_FEASIBILITY_TOL = 1e-9
+
+SOLVER_METHOD = "RK45"
+SOLVER_RTOL = 1e-6
+SOLVER_ATOL = 1e-9
 
 
-def chirp_signal(t, f0, f1, T, A, x_r_start):
+# =============================================================================
+# PARAMETER AND SIGNAL UTILITIES
+# =============================================================================
+
+def chirp_signal(
+    t: float | np.ndarray,
+    f0: float,
+    f1: float,
+    T: float,
+    A: float,
+    x_r_start: float,
+) -> np.ndarray:
     """
-    Generate a linear-frequency chirp command signal.
+    Generate the commanded robot position using a linear-frequency chirp.
 
-    The signal is generated using a sine function so that the initial command
-    is consistent with the initial robot position:
+    The signal is defined so that:
 
         x_rd(0) = x_r_start
 
-    This avoids an artificial initial jump in the commanded trajectory.
+    This avoids an artificial jump between the initial robot position and the
+    initial commanded position.
 
-    Inputs
-    ------
-    t : float or array-like
+    Parameters
+    ----------
+    t : float or ndarray
         Time instant(s) [s].
     f0 : float
         Initial chirp frequency [Hz].
     f1 : float
         Final chirp frequency [Hz].
     T : float
-        Total chirp duration [s].
+        Chirp duration [s].
     A : float
         Chirp amplitude [m].
     x_r_start : float
-        Initial/offset robot position relative to the base [m].
+        Initial robot relative position [m].
 
-    Output
-    ------
-    x_rd : float or ndarray
-        Commanded robot position [m].
+    Returns
+    -------
+    ndarray
+        Commanded robot position x_rd(t) [m].
     """
-    t = np.asarray(t)
+    t_array = np.asarray(t, dtype=float)
 
     if T <= 0:
-        return x_r_start * np.ones_like(t, dtype=float)
+        return x_r_start * np.ones_like(t_array, dtype=float)
 
     chirp_rate = (f1 - f0) / T
-    phase = 2 * np.pi * (f0 * t + 0.5 * chirp_rate * t**2)
+    phase = 2.0 * np.pi * (f0 * t_array + 0.5 * chirp_rate * t_array**2)
 
     return x_r_start + A * np.sin(phase)
 
 
-def prepare_params(params, T_sim):
+def prepare_params(
+    params: Mapping[str, float] | Sequence[float],
+    T_sim: float,
+) -> dict[str, float]:
     """
-    Convert input parameters to a dictionary and add default values.
+    Convert input parameters to a complete parameter dictionary.
 
-    This function avoids modifying the original input dictionary.
-
-    Inputs
-    ------
-    params : dict or array-like
-        If dict, it must contain:
-            Kb, Kr, Mb, hb, hr, f0, f1, A, x_r_start
-
-        If array-like, the expected order is:
-            [Kb, Kr, Mb, hb, hr, f0, f1, A, x_r_start]
-
+    Parameters
+    ----------
+    params : dict or sequence
+        If a dictionary is provided, it must contain the simulator parameters.
+        If a sequence is provided, the expected order is PARAM_ORDER.
     T_sim : float
-        Simulation time [s]. It is also used as chirp duration.
+        Simulation duration [s]. It is also used as the chirp duration.
 
-    Output
-    ------
-    params : dict
+    Returns
+    -------
+    dict
         Complete parameter dictionary, including:
-            T  : chirp duration [s]
-            Mr : robot mass [kg], default 10.0
+        - T  : chirp duration [s]
+        - Mr : robot mass [kg]
     """
-    if isinstance(params, (list, tuple, np.ndarray)):
-        params = dict(zip(PARAM_ORDER, params))
+    if isinstance(params, Mapping):
+        prepared = dict(params)
     else:
-        params = params.copy()
+        if len(params) != len(PARAM_ORDER):
+            raise ValueError(
+                f"Expected {len(PARAM_ORDER)} parameters in order {PARAM_ORDER}, "
+                f"received {len(params)}."
+            )
+        prepared = dict(zip(PARAM_ORDER, params))
 
-    params['T'] = T_sim
-    params.setdefault('Mr', 10.0)
+    missing = [name for name in PARAM_ORDER if name not in prepared]
+    if missing:
+        raise KeyError(f"Missing required simulator parameters: {missing}")
 
-    return params
+    prepared["T"] = float(T_sim)
+    prepared.setdefault("Mr", DEFAULT_ROBOT_MASS)
+
+    return {key: float(value) for key, value in prepared.items()}
 
 
-def compute_damping(K, M, h):
+def compute_damping(K: float, M: float, h: float) -> float:
     """
     Compute the viscous damping coefficient from the damping ratio.
 
     Formula:
+
         D = 2 h sqrt(K M)
 
-    Inputs
-    ------
+    Parameters
+    ----------
     K : float
         Stiffness [N/m].
     M : float
@@ -132,151 +174,141 @@ def compute_damping(K, M, h):
     h : float
         Damping ratio [-].
 
-    Output
-    ------
-    D : float
+    Returns
+    -------
+    float
         Viscous damping coefficient [Ns/m].
     """
-    return 2.0 * h * np.sqrt(K * M)
+    if K <= 0:
+        raise ValueError("Stiffness K must be positive.")
+    if M <= 0:
+        raise ValueError("Mass M must be positive.")
+
+    return float(2.0 * h * np.sqrt(K * M))
 
 
-def compute_natural_frequency(K, M):
+def compute_natural_frequency(K: float, M: float) -> tuple[float, float]:
     """
     Compute the undamped natural frequency of a mass-spring subsystem.
 
-    Formula:
-        omega_n = sqrt(K / M)
-        f_n     = omega_n / (2*pi)
-
-    Inputs
-    ------
+    Parameters
+    ----------
     K : float
         Stiffness [N/m].
     M : float
         Mass [kg].
 
-    Output
-    ------
+    Returns
+    -------
     omega_n : float
         Natural angular frequency [rad/s].
     f_n : float
         Natural frequency [Hz].
     """
+    if K <= 0:
+        raise ValueError("Stiffness K must be positive.")
+    if M <= 0:
+        raise ValueError("Mass M must be positive.")
+
     omega_n = np.sqrt(K / M)
     f_n = omega_n / (2.0 * np.pi)
+
     return float(omega_n), float(f_n)
 
 
-def system_dynamics(t, state, params):
+# =============================================================================
+# DYNAMIC MODEL
+# =============================================================================
+
+def system_dynamics(
+    t: float,
+    state: Sequence[float],
+    params: Mapping[str, float],
+) -> list[float]:
     """
     Compute the time derivative of the 2-DoF system state.
 
     State definition:
+
         state = [dx_b, dx_r, x_b, x_r]
 
     where:
-    - dx_b: base velocity [m/s]
-    - dx_r: robot relative velocity [m/s]
-    - x_b : base position [m]
-    - x_r : robot position relative to the base [m]
+    - dx_b is the base velocity [m/s];
+    - dx_r is the robot relative velocity [m/s];
+    - x_b is the base position [m];
+    - x_r is the robot position relative to the base [m].
 
-    The absolute end-effector position is:
-        y = x_b + x_r
-
-    Inputs
-    ------
+    Parameters
+    ----------
     t : float
         Current time [s].
-    state : array-like, shape (4,)
-        Current state [dx_b, dx_r, x_b, x_r].
+    state : sequence of float
+        Current system state [dx_b, dx_r, x_b, x_r].
     params : dict
-        System and excitation parameters:
-            Kb, Kr : base and robot stiffness [N/m]
-            Mb, Mr : base and robot mass [kg]
-            hb, hr : base and robot damping ratio [-]
-            f0, f1 : chirp initial/final frequency [Hz]
-            A      : chirp amplitude [m]
-            x_r_start : initial/offset robot position [m]
-            T      : chirp duration [s]
+        Complete parameter dictionary.
 
-    Output
-    ------
-    dstate : list
+    Returns
+    -------
+    list of float
         State derivative [ddx_b, ddx_r, dx_b, dx_r].
     """
     dx_b, dx_r, x_b, x_r = state
 
-    Kb = params['Kb']
-    Kr = params['Kr']
-    Mb = params['Mb']
-    Mr = params.get('Mr', 10.0)
+    Kb = params["Kb"]
+    Kr = params["Kr"]
+    Mb = params["Mb"]
+    Mr = params.get("Mr", DEFAULT_ROBOT_MASS)
 
-    hb = params['hb']
-    hr = params['hr']
+    hb = params["hb"]
+    hr = params["hr"]
 
-    f0 = params['f0']
-    f1 = params['f1']
-    A = params['A']
-    x_r_start = params['x_r_start']
-    T = params.get('T', 60.0)
+    f0 = params["f0"]
+    f1 = params["f1"]
+    A = params["A"]
+    x_r_start = params["x_r_start"]
+    T = params.get("T", DEFAULT_T_SIM)
 
     Db = compute_damping(Kb, Mb, hb)
     Dr = compute_damping(Kr, Mr, hr)
 
-    x_rd = chirp_signal(t, f0, f1, T, A, x_r_start)
+    x_rd = float(chirp_signal(t, f0, f1, T, A, x_r_start))
 
-    # Dynamic equations.
-    # Since x_r is relative to the base, the relative acceleration of the robot
-    # also depends on the acceleration of the passive base.
     ddx_b = (Dr * dx_r + Kr * (x_r - x_rd) - Db * dx_b - Kb * x_b) / Mb
     ddx_r = (-Dr * dx_r - Kr * (x_r - x_rd)) / Mr - ddx_b
 
     return [ddx_b, ddx_r, dx_b, dx_r]
 
 
-def compute_metrics(sol, x_r_max=0.5, y_target=None, feasibility_tol=1e-9):
+# =============================================================================
+# METRICS
+# =============================================================================
+
+def compute_metrics(
+    sol: Any,
+    x_r_max: float = DEFAULT_ROBOT_LIMIT,
+    y_target: float | None = None,
+    feasibility_tol: float = DEFAULT_FEASIBILITY_TOL,
+) -> dict[str, Any]:
     """
     Compute physical performance metrics from the simulation result.
 
-    Inputs
-    ------
+    Parameters
+    ----------
     sol : OdeResult
         Output object returned by scipy.integrate.solve_ivp.
     x_r_max : float, optional
-        Maximum admissible robot relative position [m].
-        This value also represents the nominal robot reach.
-        Default is 0.5 m.
+        Maximum admissible robot relative displacement [m].
     y_target : float, optional
         Desired total outreach target [m].
     feasibility_tol : float, optional
-        Numerical tolerance used to classify a solution as feasible.
+        Numerical tolerance used to classify feasibility.
 
-    Outputs
+    Returns
     -------
-    metrics : dict
-        Dictionary containing:
-            peak_y                    : maximum total outreach [m]
-            t_peak                    : time at which peak_y occurs [s]
-            final_y                   : final total outreach [m]
-            max_xr                    : maximum robot relative position [m]
-            min_xr                    : minimum robot relative position [m]
-            max_abs_xr                : maximum absolute robot relative position [m]
-            max_xb                    : maximum base position [m]
-            min_xb                    : minimum base position [m]
-            max_abs_xb                : maximum absolute base position [m]
-            x_r_max                   : nominal robot reach limit [m]
-            extra_reach               : peak_y - x_r_max [m]
-            constraint_violation      : violation of positive robot limit [m]
-            constraint_violation_abs  : violation of absolute robot limit [m]
-            feasible                  : feasibility using the positive robot limit
-            feasible_abs              : feasibility using the absolute robot limit
-
-        If y_target is provided:
-            y_target       : target outreach [m]
-            target_error   : absolute error between peak_y and target [m]
-            target_reached : True if peak_y >= y_target
+    dict
+        Physical performance metrics.
     """
-    dx_b, dx_r, x_b, x_r = sol.y
+    _, _, x_b, x_r = sol.y
     y = x_b + x_r
 
     peak_idx = int(np.argmax(y))
@@ -290,134 +322,116 @@ def compute_metrics(sol, x_r_max=0.5, y_target=None, feasibility_tol=1e-9):
     min_xb = float(np.min(x_b))
     max_abs_xb = float(np.max(np.abs(x_b)))
 
-    # Original one-sided constraint used in the previous pipeline:
-    # x_r(t) <= x_r_max.
     constraint_violation = max(0.0, max_xr - x_r_max)
-
-    # More physically explicit symmetric workspace constraint:
-    # |x_r(t)| <= x_r_max.
     constraint_violation_abs = max(0.0, max_abs_xr - x_r_max)
 
-    extra_reach = peak_y - x_r_max
-
-    metrics = {
-        'peak_y': peak_y,
-        't_peak': float(sol.t[peak_idx]),
-        'final_y': float(y[-1]),
-        'max_xr': max_xr,
-        'min_xr': min_xr,
-        'max_abs_xr': max_abs_xr,
-        'max_xb': max_xb,
-        'min_xb': min_xb,
-        'max_abs_xb': max_abs_xb,
-        'x_r_max': float(x_r_max),
-        'extra_reach': float(extra_reach),
-        'constraint_violation': float(constraint_violation),
-        'constraint_violation_abs': float(constraint_violation_abs),
-        'feasible': bool(constraint_violation <= feasibility_tol),
-        'feasible_abs': bool(constraint_violation_abs <= feasibility_tol),
+    metrics: dict[str, Any] = {
+        "peak_y": peak_y,
+        "t_peak": float(sol.t[peak_idx]),
+        "final_y": float(y[-1]),
+        "max_xr": max_xr,
+        "min_xr": min_xr,
+        "max_abs_xr": max_abs_xr,
+        "max_xb": max_xb,
+        "min_xb": min_xb,
+        "max_abs_xb": max_abs_xb,
+        "x_r_max": float(x_r_max),
+        "extra_reach": float(peak_y - x_r_max),
+        "constraint_violation": float(constraint_violation),
+        "constraint_violation_abs": float(constraint_violation_abs),
+        "feasible": bool(constraint_violation <= feasibility_tol),
+        "feasible_abs": bool(constraint_violation_abs <= feasibility_tol),
     }
 
     if y_target is not None:
-        metrics['y_target'] = float(y_target)
-        metrics['target_error'] = float(abs(peak_y - y_target))
-        metrics['target_reached'] = bool(peak_y >= y_target)
+        target_error = abs(peak_y - float(y_target))
+        metrics.update(
+            {
+                "y_target": float(y_target),
+                "target_error": float(target_error),
+                "target_error_mm": float(target_error * 1000.0),
+                "target_reached": bool(peak_y >= float(y_target)),
+            }
+        )
 
     return metrics
 
+
+# =============================================================================
+# SIMULATION INTERFACE
+# =============================================================================
+
 def simulate_system(
-    params,
-    T_sim=60.0,
-    dt=0.001,
-    return_full=False,
-    return_metrics=False,
-    x_r_max=0.5,
-    y_target=None,
-    feasibility_tol=1e-9
+    params: Mapping[str, float] | Sequence[float],
+    T_sim: float = DEFAULT_T_SIM,
+    dt: float = DEFAULT_DT,
+    return_full: bool = False,
+    return_metrics: bool = False,
+    x_r_max: float = DEFAULT_ROBOT_LIMIT,
+    y_target: float | None = None,
+    feasibility_tol: float = DEFAULT_FEASIBILITY_TOL,
 ):
     """
-    Simulate the 2-DoF system.
+    Simulate the 2-DoF compliant-base robot system.
 
-    Inputs
-    ------
-    params : dict or array-like
+    This function keeps the same return interface used by the rest of the
+    project.
+
+    Parameters
+    ----------
+    params : dict or sequence
         System and excitation parameters.
-
-        If dict, expected keys are:
-            Kb, Kr, Mb, hb, hr, f0, f1, A, x_r_start
-
-        Optional key:
-            Mr, robot mass [kg]. If not provided, Mr = 10.0 kg.
-
-        If array-like, expected order is:
-            [Kb, Kr, Mb, hb, hr, f0, f1, A, x_r_start]
-
     T_sim : float, optional
         Simulation duration [s].
-        Default is 60.0 s.
     dt : float, optional
-        Time step used for storing the solution [s].
-        Default is 0.001 s.
+        Time step used to store the solution [s].
     return_full : bool, optional
-        If True, return the complete ODE solution.
+        If True, return the full ODE solution.
     return_metrics : bool, optional
-        If True, return additional physical metrics.
+        If True, return the physical metrics dictionary.
     x_r_max : float, optional
-        Maximum admissible robot relative position [m].
-        Used only for metric computation.
+        Maximum admissible robot relative displacement [m].
     y_target : float, optional
         Desired total outreach target [m].
-        Used only for metric computation.
     feasibility_tol : float, optional
-        Numerical tolerance used to classify feasibility.
+        Numerical tolerance used for feasibility classification.
 
-    Outputs
+    Returns
     -------
-    Default:
-        peak_y : float
-            Maximum total outreach [m].
-
-    If return_full=True:
-        peak_y : float
-            Maximum total outreach [m].
-        sol : OdeResult
-            Full simulation result.
-
-    If return_metrics=True:
-        peak_y : float
-            Maximum total outreach [m].
-        metrics : dict
-            Physical performance metrics.
-
-    If return_full=True and return_metrics=True:
-        peak_y : float
-            Maximum total outreach [m].
-        sol : OdeResult
-            Full simulation result.
-        metrics : dict
-            Physical performance metrics.
+    float or tuple
+        Depending on return_full and return_metrics:
+        - peak_y
+        - peak_y, sol
+        - peak_y, metrics
+        - peak_y, sol, metrics
     """
-    params = prepare_params(params, T_sim)
-
-    # Initial state: [dx_b, dx_r, x_b, x_r]
-    x0 = [0.0, 0.0, 0.0, params['x_r_start']]
-
     if T_sim <= 0:
         raise ValueError("T_sim must be positive.")
     if dt <= 0:
         raise ValueError("dt must be positive.")
+    if x_r_max <= 0:
+        raise ValueError("x_r_max must be positive.")
 
-    t_eval = np.arange(0.0, T_sim + dt, dt)
+    prepared_params = prepare_params(params, T_sim)
+
+    initial_state = [
+        0.0,
+        0.0,
+        0.0,
+        prepared_params["x_r_start"],
+    ]
+
+    t_eval = np.arange(0.0, T_sim + 0.5 * dt, dt)
 
     sol = solve_ivp(
         system_dynamics,
-        t_span=[0.0, T_sim],
-        y0=x0,
+        t_span=(0.0, T_sim),
+        y0=initial_state,
         t_eval=t_eval,
-        args=(params,),
-        method='RK45',
-        rtol=1e-6,
-        atol=1e-9
+        args=(prepared_params,),
+        method=SOLVER_METHOD,
+        rtol=SOLVER_RTOL,
+        atol=SOLVER_ATOL,
     )
 
     if not sol.success:
@@ -430,12 +444,13 @@ def simulate_system(
         return np.nan
 
     metrics = compute_metrics(
-        sol,
+        sol=sol,
         x_r_max=x_r_max,
         y_target=y_target,
-        feasibility_tol=feasibility_tol
+        feasibility_tol=feasibility_tol,
     )
-    peak_y = metrics['peak_y']
+
+    peak_y = metrics["peak_y"]
 
     if return_full and return_metrics:
         return peak_y, sol, metrics
@@ -449,44 +464,46 @@ def simulate_system(
     return peak_y
 
 
+# =============================================================================
+# PLOTTING UTILITY
+# =============================================================================
+
 def plot_simulation_example(
-    params,
-    T_sim=60.0,
-    dt=0.001,
-    y_target=None,
-    x_r_max=0.5,
-    save_path=None
-):
+    params: Mapping[str, float] | Sequence[float],
+    T_sim: float = DEFAULT_T_SIM,
+    dt: float = DEFAULT_DT,
+    y_target: float | None = None,
+    x_r_max: float = DEFAULT_ROBOT_LIMIT,
+    save_path: str | Path | None = None,
+    show: bool = True,
+) -> tuple[float, dict[str, Any]]:
     """
-    Plot a complete simulation example for validation.
+    Plot a complete simulation example.
 
     The figure shows:
-    1. Commanded chirp signal x_rd(t)
-    2. Passive base position x_b(t)
-    3. Robot relative position x_r(t)
-    4. Total outreach y(t) = x_b(t) + x_r(t)
+    1. commanded chirp signal x_rd(t);
+    2. passive base position x_b(t);
+    3. robot relative position x_r(t);
+    4. total outreach y(t) = x_b(t) + x_r(t).
 
-    Optional horizontal lines are added for:
-    - target outreach y_target
-    - nominal robot reach x_r_max
-    - achieved peak outreach
-
-    Inputs
-    ------
-    params : dict or array-like
+    Parameters
+    ----------
+    params : dict or sequence
         System and excitation parameters.
     T_sim : float, optional
         Simulation duration [s].
     dt : float, optional
-        Time step used for storing the solution [s].
+        Time step used to store the solution [s].
     y_target : float, optional
         Desired total outreach target [m].
     x_r_max : float, optional
-        Maximum admissible robot relative position [m].
-    save_path : str, optional
-        If provided, path where the figure is saved.
+        Maximum admissible robot relative displacement [m].
+    save_path : str or Path, optional
+        Path where the figure is saved.
+    show : bool, optional
+        If True, display the figure.
 
-    Outputs
+    Returns
     -------
     peak_y : float
         Maximum total outreach [m].
@@ -494,167 +511,174 @@ def plot_simulation_example(
         Physical performance metrics.
     """
     peak_y, sol, metrics = simulate_system(
-        params,
+        params=params,
         T_sim=T_sim,
         dt=dt,
         return_full=True,
         return_metrics=True,
         x_r_max=x_r_max,
-        y_target=y_target
+        y_target=y_target,
     )
 
+    if sol is None or not np.isfinite(peak_y):
+        raise RuntimeError("Simulation failed. Cannot generate plot.")
+
     t = sol.t
-    dx_b, dx_r, x_b, x_r = sol.y
+    _, _, x_b, x_r = sol.y
     y = x_b + x_r
 
-    params_prepared = prepare_params(params, T_sim)
+    prepared_params = prepare_params(params, T_sim)
 
     x_rd = chirp_signal(
-        t,
-        params_prepared['f0'],
-        params_prepared['f1'],
-        T_sim,
-        params_prepared['A'],
-        params_prepared['x_r_start']
+        t=t,
+        f0=prepared_params["f0"],
+        f1=prepared_params["f1"],
+        T=T_sim,
+        A=prepared_params["A"],
+        x_r_start=prepared_params["x_r_start"],
     )
 
     fig, axes = plt.subplots(4, 1, figsize=(12, 10), sharex=True)
 
-    # Commanded chirp signal
-    axes[0].plot(t, x_rd, 'b-', linewidth=1.5, label='$x_{rd}$ command')
-    axes[0].set_ylabel('Position [m]')
-    axes[0].legend(loc='upper right')
+    axes[0].plot(t, x_rd, linewidth=1.5, label=r"$x_{rd}(t)$ command")
+    axes[0].set_ylabel("Position [m]")
+    axes[0].set_title("Excitation signal: chirp command", fontsize=11)
+    axes[0].legend(loc="upper right")
     axes[0].grid(True, alpha=0.3)
-    axes[0].set_title('Excitation signal: chirp command', fontsize=11)
 
-    # Passive base position
-    axes[1].plot(t, x_b, 'purple', linewidth=1.5, label='$x_b$ passive base')
-    axes[1].set_ylabel('Position [m]')
-    axes[1].legend(loc='upper right')
+    axes[1].plot(t, x_b, linewidth=1.5, label=r"$x_b(t)$ passive base")
+    axes[1].set_ylabel("Position [m]")
+    axes[1].legend(loc="upper right")
     axes[1].grid(True, alpha=0.3)
 
-    # Robot relative position
-    axes[2].plot(t, x_r, 'red', linewidth=1.5, label='$x_r$ robot relative position')
+    axes[2].plot(t, x_r, linewidth=1.5, label=r"$x_r(t)$ robot relative position")
     axes[2].axhline(
         x_r_max,
-        color='black',
-        linestyle='--',
+        linestyle="--",
         linewidth=1.5,
-        label=f'Robot max = {x_r_max:.2f} m'
+        label=f"Robot limit = {x_r_max:.2f} m",
     )
-    axes[2].set_ylabel('Position [m]')
-    axes[2].legend(loc='upper right')
+    axes[2].set_ylabel("Position [m]")
+    axes[2].legend(loc="upper right")
     axes[2].grid(True, alpha=0.3)
 
-    # Total outreach
-    axes[3].plot(t, y, 'k-', linewidth=2, label='$y = x_b + x_r$ outreach')
+    axes[3].plot(t, y, linewidth=2.0, label=r"$y(t)=x_b(t)+x_r(t)$")
     axes[3].axhline(
         peak_y,
-        color='red',
-        linestyle='--',
+        linestyle="--",
         linewidth=1.5,
-        label=f'Peak = {peak_y:.3f} m'
+        label=f"Peak = {peak_y:.3f} m",
     )
     axes[3].axhline(
         x_r_max,
-        color='black',
-        linestyle=':',
+        linestyle=":",
         linewidth=1.5,
-        label=f'Nominal reach = {x_r_max:.2f} m'
+        label=f"Nominal reach = {x_r_max:.2f} m",
     )
 
     if y_target is not None:
         axes[3].axhline(
             y_target,
-            color='green',
-            linestyle='-.',
+            linestyle="-.",
             linewidth=1.5,
-            label=f'Target = {y_target:.3f} m'
+            label=f"Target = {y_target:.3f} m",
         )
 
-    axes[3].set_xlabel('Time [s]')
-    axes[3].set_ylabel('Outreach [m]')
-    axes[3].legend(loc='upper right')
-    axes[3].grid(True, alpha=0.3)
+    axes[3].set_xlabel("Time [s]")
+    axes[3].set_ylabel("Outreach [m]")
     axes[3].set_title(
-        f'Total outreach: peak = {peak_y:.3f} m, '
-        f'extra reach = {metrics["extra_reach"]:.3f} m',
-        fontsize=11
+        f"Total outreach: peak = {peak_y:.3f} m, "
+        f"extra reach = {metrics['extra_reach']:.3f} m",
+        fontsize=11,
     )
+    axes[3].legend(loc="upper right")
+    axes[3].grid(True, alpha=0.3)
 
     plt.tight_layout()
 
-    if save_path:
+    if save_path is not None:
         save_path = Path(save_path)
         save_path.parent.mkdir(parents=True, exist_ok=True)
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"✓ Figure saved: {save_path}")
+        fig.savefig(save_path, dpi=300, bbox_inches="tight")
+        print(f"Saved figure: {save_path}")
 
-    plt.show()
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
 
     return peak_y, metrics
 
 
-# ============================================================================
-# TEST: run this file to verify that the simulator works correctly
-# ============================================================================
+# =============================================================================
+# SELF-TEST
+# =============================================================================
 
-if __name__ == "__main__":
+def main() -> None:
+    """Run a simple simulator test."""
     print("=" * 70)
     print("TEST: src/dynamics.py")
     print("=" * 70)
 
     test_params = {
-        'Kb': 2000,
-        'Kr': 1500,
-        'Mb': 50,
-        'hb': 0.2,
-        'hr': 0.5,
-        'f0': 0.001,
-        'f1': 5,
-        'A': 0.10,
-        'x_r_start': 0.4,
-        'Mr': 10
+        "Kb": 2000.0,
+        "Kr": 1500.0,
+        "Mb": 50.0,
+        "hb": 0.2,
+        "hr": 0.5,
+        "f0": 0.001,
+        "f1": 5.0,
+        "A": 0.10,
+        "x_r_start": 0.4,
+        "Mr": 10.0,
     }
 
-    x_r_max = 0.5
+    x_r_max = DEFAULT_ROBOT_LIMIT
     y_target = 0.55
 
     print("\nTest parameters:")
-    for key, val in test_params.items():
-        print(f"  {key:12s} = {val}")
+    for key, value in test_params.items():
+        print(f"  {key:12s} = {value}")
 
     print("\nRunning simulation...")
+
     peak_y, metrics = simulate_system(
-        test_params,
-        T_sim=60,
-        dt=0.001,
+        params=test_params,
+        T_sim=DEFAULT_T_SIM,
+        dt=DEFAULT_DT,
         return_metrics=True,
         x_r_max=x_r_max,
-        y_target=y_target
+        y_target=y_target,
     )
 
-    print("\n✓ Simulation completed!")
+    print("\nSimulation completed.")
     print(f"  Peak outreach:          {peak_y:.4f} m")
     print(f"  Nominal robot reach:    {metrics['x_r_max']:.4f} m")
     print(f"  Extra reach:            {metrics['extra_reach']:.4f} m")
     print(f"  Max robot position xr:  {metrics['max_xr']:.4f} m")
+    print(f"  Max abs robot xr:       {metrics['max_abs_xr']:.4f} m")
     print(f"  Constraint violation:   {metrics['constraint_violation']:.4f} m")
     print(f"  Abs. constraint viol.:  {metrics['constraint_violation_abs']:.4f} m")
     print(f"  Feasible:               {metrics['feasible']}")
     print(f"  Feasible abs.:          {metrics['feasible_abs']}")
     print(f"  Target error:           {metrics.get('target_error', np.nan):.4f} m")
 
-    print("\nGenerating plot...")
+    print("\nGenerating validation plot...")
+
     plot_simulation_example(
-        test_params,
-        T_sim=60,
-        dt=0.001,
+        params=test_params,
+        T_sim=DEFAULT_T_SIM,
+        dt=DEFAULT_DT,
         y_target=y_target,
         x_r_max=x_r_max,
-        save_path='figures/test_simulation.png'
+        save_path="figures/test_simulation.png",
+        show=True,
     )
 
     print("\n" + "=" * 70)
-    print("TEST COMPLETED SUCCESSFULLY!")
+    print("TEST COMPLETED SUCCESSFULLY")
     print("=" * 70)
+
+
+if __name__ == "__main__":
+    main()

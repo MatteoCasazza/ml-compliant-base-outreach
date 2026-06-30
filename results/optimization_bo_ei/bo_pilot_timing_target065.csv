@@ -1,2 +1,0 @@
-run_label,target,kernel,acquisition,seed,total_evaluations,initial_points,bo_iterations,total_wall_time_s,mean_iteration_time_s,mean_simulation_time_s,mean_gp_fit_time_s,mean_acquisition_time_s,best_target_error_mm,best_peak_y_true,best_max_abs_xr_true,best_residual_margin_mm,best_feasible_abs
-pilot,0.65,matern,ei,12345,30,10,20,12.779330899938941,0.42572088333545255,0.3765186999924481,0.04694800666766241,0.002170266661172112,13.283257190590314,0.6367167428094097,0.49823582148405854,1.7641785159414614,True

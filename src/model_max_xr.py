@@ -1,54 +1,61 @@
 """
 model_max_xr.py
-================
+===============
 
-Gaussian Process Regression surrogate model for predicting the absolute robot
-relative displacement constraint quantity max_abs_xr.
+Gaussian Process surrogate for predicting the absolute robot-displacement
+constraint quantity max_abs_xr.
 
 Workflow
 --------
-1. Load augmented simulation dataset
-2. Train/test split
-3. Standardize input and output variables
-4. Train a Gaussian Process Regressor
-5. Evaluate regression accuracy
-6. Evaluate constraint classification accuracy
-7. Evaluate near-boundary performance around the robot limit
-8. Analyze parameter relevance using ARD length-scales
-9. Generate diagnostic plots
-10. Save model, scalers, metrics, ARD results and model information
+1. Load the augmented simulation dataset.
+2. Split the dataset into training and test sets.
+3. Standardize input and output variables.
+4. Train a Gaussian Process Regressor.
+5. Evaluate regression accuracy.
+6. Evaluate constraint-classification accuracy.
+7. Evaluate near-boundary performance around the robot limit.
+8. Analyze parameter relevance using ARD length-scales.
+9. Generate diagnostic plots.
+10. Save model, scalers, metrics, ARD results and model information.
 
-Main supervised-learning task:
-    [Kb, Kr, Mb, hb, hr, f0, f1, A, x_r_start] -> max_abs_xr
+Supervised-learning task
+------------------------
+[Kb, Kr, Mb, hb, hr, f0, f1, A, x_r_start] -> max_abs_xr
 
-The GP_max_abs_xr model is used as an auxiliary constraint surrogate inside
-constraint-aware inverse optimization. It does not replace the main GP_peak_y
-surrogate.
+The GP_max_abs_xr model is used as the constraint surrogate inside the
+constraint-aware inverse optimization pipeline. It complements the GP_peak_y
+surrogate and does not replace it.
 
-Author: MatteoCasazza
+Author: Matteo Casazza
 Date: 2026
 """
 
+from __future__ import annotations
+
+import argparse
 import time
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Any
 
 import joblib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-
 from sklearn.gaussian_process import GaussianProcessRegressor
-from sklearn.gaussian_process.kernels import ConstantKernel as C
-from sklearn.gaussian_process.kernels import Matern, WhiteKernel
+from sklearn.gaussian_process.kernels import (
+    ConstantKernel,
+    Matern,
+    RBF,
+    WhiteKernel,
+)
 from sklearn.metrics import confusion_matrix, mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 
 
-# ============================================================================
+# =============================================================================
 # PROJECT PATHS
-# ============================================================================
+# =============================================================================
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -56,18 +63,15 @@ DATA_DIR = PROJECT_ROOT / "data"
 RESULTS_DIR = PROJECT_ROOT / "results"
 FIGURES_DIR = PROJECT_ROOT / "figures"
 
-DATASET_PATH = DATA_DIR / "dataset_augmented.csv"
+DEFAULT_DATASET_PATH = DATA_DIR / "dataset_augmented.csv"
 
 GP_CONSTRAINT_RESULTS_DIR = RESULTS_DIR / "gp_constraints"
 GP_CONSTRAINT_FIGURES_DIR = FIGURES_DIR / "gp_constraints"
 
-for directory in [GP_CONSTRAINT_RESULTS_DIR, GP_CONSTRAINT_FIGURES_DIR]:
-    directory.mkdir(parents=True, exist_ok=True)
 
-
-# ============================================================================
-# GLOBAL SETTINGS
-# ============================================================================
+# =============================================================================
+# DEFAULT SETTINGS
+# =============================================================================
 
 INPUT_COLUMNS = [
     "Kb",
@@ -81,7 +85,6 @@ INPUT_COLUMNS = [
     "x_r_start",
 ]
 
-# New absolute constraint target.
 TARGET_COLUMN = "max_abs_xr"
 
 ROBOT_LIMIT_TRUE = 0.500
@@ -90,58 +93,85 @@ ROBOT_LIMIT_OPT = 0.495
 NEAR_BOUNDARY_LOW = 0.480
 NEAR_BOUNDARY_HIGH = 0.520
 
-TEST_SIZE = 0.20
-RANDOM_STATE = 42
+DEFAULT_TEST_SIZE = 0.20
+DEFAULT_RANDOM_STATE = 42
 
-KERNEL_TYPE = "matern32"
-ALPHA = 1e-6
-N_RESTARTS = 3
+DEFAULT_KERNEL = "matern32"
+DEFAULT_ALPHA = 1e-6
+DEFAULT_N_RESTARTS = 3
+
+SUPPORTED_KERNELS = ("matern32", "matern52", "rbf")
 
 
-# ============================================================================
+# =============================================================================
+# BASIC UTILITIES
+# =============================================================================
+
+def ensure_dirs() -> None:
+    """Create output directories if they do not exist."""
+    GP_CONSTRAINT_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    GP_CONSTRAINT_FIGURES_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def require_file(path: Path) -> None:
+    """Raise a clear error if a required file does not exist."""
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Required file not found: {path}\n"
+            "Run the previous pipeline step first."
+        )
+
+
+def require_columns(df: pd.DataFrame, columns: list[str], label: str) -> None:
+    """Raise a clear error if required columns are missing."""
+    missing = [col for col in columns if col not in df.columns]
+    if missing:
+        raise KeyError(f"{label} is missing required columns: {missing}")
+
+
+# =============================================================================
 # DATA LOADING AND PREPROCESSING
-# ============================================================================
+# =============================================================================
 
 def load_constraint_dataset(
-    filepath: str | Path = DATASET_PATH,
-) -> Tuple[np.ndarray, np.ndarray, pd.DataFrame]:
-    """
-    Load dataset for the max_abs_xr constraint surrogate.
-    """
+    filepath: Path | str = DEFAULT_DATASET_PATH,
+) -> tuple[np.ndarray, np.ndarray, pd.DataFrame]:
+    """Load the dataset for the max_abs_xr constraint surrogate."""
     filepath = Path(filepath)
-
-    if not filepath.exists():
-        raise FileNotFoundError(f"Dataset not found: {filepath}")
+    require_file(filepath)
 
     df = pd.read_csv(filepath, comment="#")
 
-    missing_inputs = [col for col in INPUT_COLUMNS if col not in df.columns]
-    if missing_inputs:
-        raise ValueError(f"Missing input columns: {missing_inputs}")
+    require_columns(df, INPUT_COLUMNS, "Dataset")
 
     if TARGET_COLUMN not in df.columns:
-        raise ValueError(
-            f"Missing target column '{TARGET_COLUMN}'. "
+        raise KeyError(
+            f"Dataset is missing target column '{TARGET_COLUMN}'. "
             "Regenerate dataset.py and augment_high_outreach.py so that "
             "dataset_augmented.csv contains max_abs_xr."
         )
 
     df = df.dropna(subset=INPUT_COLUMNS + [TARGET_COLUMN]).reset_index(drop=True)
 
-    X = df[INPUT_COLUMNS].values
-    y = df[TARGET_COLUMN].values
+    X = df[INPUT_COLUMNS].to_numpy(dtype=float)
+    y = df[TARGET_COLUMN].to_numpy(dtype=float)
 
     return X, y, df
 
 
 def print_dataset_summary(df: pd.DataFrame) -> None:
-    """
-    Print dataset and absolute-constraint statistics.
-    """
-    y = df[TARGET_COLUMN].values
+    """Print dataset and absolute-constraint statistics."""
+    require_columns(df, [TARGET_COLUMN], "Dataset")
+
+    y = df[TARGET_COLUMN].to_numpy(dtype=float)
 
     true_feasible = y <= ROBOT_LIMIT_TRUE
     opt_feasible = y <= ROBOT_LIMIT_OPT
+
+    near_boundary = df[
+        (df[TARGET_COLUMN] >= NEAR_BOUNDARY_LOW)
+        & (df[TARGET_COLUMN] <= NEAR_BOUNDARY_HIGH)
+    ]
 
     print("\n" + "=" * 70)
     print("DATASET ABSOLUTE CONSTRAINT SUMMARY")
@@ -154,13 +184,8 @@ def print_dataset_summary(df: pd.DataFrame) -> None:
     print(f"Max max_abs_xr:                {np.max(y):.6f} m")
     print(f"True robot limit:              {ROBOT_LIMIT_TRUE:.3f} m")
     print(f"Optimization safety limit:     {ROBOT_LIMIT_OPT:.3f} m")
-    print(f"Violation rate, true limit:    {np.mean(~true_feasible) * 100:.2f}%")
-    print(f"Violation rate, opt limit:     {np.mean(~opt_feasible) * 100:.2f}%")
-
-    near_boundary = df[
-        (df[TARGET_COLUMN] >= NEAR_BOUNDARY_LOW)
-        & (df[TARGET_COLUMN] <= NEAR_BOUNDARY_HIGH)
-    ]
+    print(f"Violation rate, true limit:    {np.mean(~true_feasible) * 100.0:.2f}%")
+    print(f"Violation rate, opt limit:     {np.mean(~opt_feasible) * 100.0:.2f}%")
     print(
         f"Near-boundary samples "
         f"[{NEAR_BOUNDARY_LOW:.3f}, {NEAR_BOUNDARY_HIGH:.3f}] m: "
@@ -169,14 +194,17 @@ def print_dataset_summary(df: pd.DataFrame) -> None:
 
     if "constraint_violation_abs" in df.columns:
         print(
-            f"Mean abs constraint violation: {df['constraint_violation_abs'].mean() * 1000:.3f} mm"
+            f"Mean abs constraint violation: "
+            f"{df['constraint_violation_abs'].mean() * 1000.0:.3f} mm"
         )
         print(
-            f"Max abs constraint violation:  {df['constraint_violation_abs'].max() * 1000:.3f} mm"
+            f"Max abs constraint violation:  "
+            f"{df['constraint_violation_abs'].max() * 1000.0:.3f} mm"
         )
 
     if "feasible_abs" in df.columns:
-        print(f"feasible_abs samples:          {int(df['feasible_abs'].sum())}")
+        feasible_abs = df["feasible_abs"].astype(bool)
+        print(f"feasible_abs samples:          {int(feasible_abs.sum())}")
 
     print("=" * 70)
 
@@ -184,9 +212,9 @@ def print_dataset_summary(df: pd.DataFrame) -> None:
 def prepare_data(
     X: np.ndarray,
     y: np.ndarray,
-    test_size: float = TEST_SIZE,
-    random_state: int = RANDOM_STATE,
-) -> Tuple[
+    test_size: float = DEFAULT_TEST_SIZE,
+    random_state: int = DEFAULT_RANDOM_STATE,
+) -> tuple[
     np.ndarray,
     np.ndarray,
     np.ndarray,
@@ -196,9 +224,10 @@ def prepare_data(
     np.ndarray,
     np.ndarray,
 ]:
-    """
-    Prepare data for GP training: train/test split and standardization.
-    """
+    """Split and standardize data for GP training."""
+    if not 0.0 < test_size < 1.0:
+        raise ValueError("test_size must be between 0 and 1.")
+
     print("\n" + "=" * 70)
     print("PREPROCESSING DATASET")
     print("=" * 70)
@@ -211,8 +240,8 @@ def prepare_data(
         shuffle=True,
     )
 
-    print(f"Train set: {len(y_train)} samples ({100 * (1 - test_size):.0f}%)")
-    print(f"Test set:  {len(y_test)} samples ({100 * test_size:.0f}%)")
+    print(f"Train set: {len(y_train)} samples ({100.0 * (1.0 - test_size):.0f}%)")
+    print(f"Test set:  {len(y_test)} samples ({100.0 * test_size:.0f}%)")
 
     scaler_X = StandardScaler()
     X_train_scaled = scaler_X.fit_transform(X_train)
@@ -222,24 +251,27 @@ def prepare_data(
     y_train_scaled = scaler_y.fit_transform(y_train.reshape(-1, 1)).ravel()
     y_test_scaled = scaler_y.transform(y_test.reshape(-1, 1)).ravel()
 
-    print("\nInput standardization:")
-    print(f"  Mean X_train, first 3 features: {X_train_scaled.mean(axis=0)[:3]}")
-    print(f"  Std  X_train, first 3 features: {X_train_scaled.std(axis=0)[:3]}")
+    print("\nInput standardization check:")
+    print(f"  Mean of standardized X_train, first 3 features: {X_train_scaled.mean(axis=0)[:3]}")
+    print(f"  Std  of standardized X_train, first 3 features: {X_train_scaled.std(axis=0)[:3]}")
 
-    print("\nOutput standardization:")
-    print(f"  Mean y_train: {y_train_scaled.mean():.6f}")
-    print(f"  Std  y_train: {y_train_scaled.std():.6f}")
+    print("\nOutput standardization check:")
+    print(f"  Mean of standardized y_train: {y_train_scaled.mean():.6f}")
+    print(f"  Std  of standardized y_train: {y_train_scaled.std():.6f}")
 
-    assert np.allclose(X_train_scaled.mean(axis=0), 0.0, atol=1e-10), \
-        "X_train is not centered feature-wise."
-    assert np.allclose(X_train_scaled.std(axis=0), 1.0, atol=1e-10), \
-        "X_train is not normalized feature-wise."
-    assert np.allclose(y_train_scaled.mean(), 0.0, atol=1e-10), \
-        "y_train is not centered."
-    assert np.allclose(y_train_scaled.std(), 1.0, atol=1e-10), \
-        "y_train is not normalized."
+    if not np.allclose(X_train_scaled.mean(axis=0), 0.0, atol=1e-10):
+        raise RuntimeError("X_train is not centered feature-wise.")
 
-    print("\n✓ Preprocessing completed")
+    if not np.allclose(X_train_scaled.std(axis=0), 1.0, atol=1e-10):
+        raise RuntimeError("X_train is not normalized feature-wise.")
+
+    if not np.allclose(y_train_scaled.mean(), 0.0, atol=1e-10):
+        raise RuntimeError("y_train is not centered.")
+
+    if not np.allclose(y_train_scaled.std(), 1.0, atol=1e-10):
+        raise RuntimeError("y_train is not normalized.")
+
+    print("\nPreprocessing completed.")
 
     return (
         X_train_scaled,
@@ -253,24 +285,29 @@ def prepare_data(
     )
 
 
-# ============================================================================
+# =============================================================================
 # GAUSSIAN PROCESS TRAINING
-# ============================================================================
+# =============================================================================
 
 def create_gp_model(
-    kernel_type: str = KERNEL_TYPE,
-    n_dims: int = 9,
-    length_scale_init: Optional[np.ndarray] = None,
-    length_scale_bounds: Tuple[float, float] = (1e-2, 1e3),
+    kernel_type: str = DEFAULT_KERNEL,
+    n_dims: int = len(INPUT_COLUMNS),
+    length_scale_init: np.ndarray | None = None,
+    length_scale_bounds: tuple[float, float] = (1e-2, 1e3),
     noise_level: float = 1e-5,
-    alpha: float = ALPHA,
-    n_restarts: int = N_RESTARTS,
+    alpha: float = DEFAULT_ALPHA,
+    n_restarts: int = DEFAULT_N_RESTARTS,
+    random_state: int = DEFAULT_RANDOM_STATE,
 ) -> GaussianProcessRegressor:
-    """
-    Create a Gaussian Process Regressor with ARD length-scales.
-    """
+    """Create a Gaussian Process Regressor with ARD length-scales."""
+    if kernel_type not in SUPPORTED_KERNELS:
+        raise ValueError(
+            f"Unsupported kernel type: {kernel_type}. "
+            f"Supported kernels are: {SUPPORTED_KERNELS}."
+        )
+
     if length_scale_init is None:
-        length_scale_init = np.ones(n_dims)
+        length_scale_init = np.ones(n_dims, dtype=float)
 
     if kernel_type == "matern32":
         base_kernel = Matern(
@@ -284,18 +321,14 @@ def create_gp_model(
             length_scale_bounds=length_scale_bounds,
             nu=2.5,
         )
-    elif kernel_type == "rbf":
-        from sklearn.gaussian_process.kernels import RBF
-
+    else:
         base_kernel = RBF(
             length_scale=length_scale_init,
             length_scale_bounds=length_scale_bounds,
         )
-    else:
-        raise ValueError(f"Unknown kernel type: {kernel_type}")
 
     kernel = (
-        C(1.0, constant_value_bounds=(1e-3, 1e3))
+        ConstantKernel(1.0, constant_value_bounds=(1e-3, 1e3))
         * base_kernel
         + WhiteKernel(noise_level=noise_level, noise_level_bounds=(1e-10, 1e-1))
     )
@@ -304,14 +337,14 @@ def create_gp_model(
         kernel=kernel,
         n_restarts_optimizer=n_restarts,
         normalize_y=False,
-        random_state=RANDOM_STATE,
+        random_state=random_state,
         alpha=alpha,
     )
 
-    print(f"\n✓ Created GP with kernel: {kernel_type.upper()}")
-    print(f"  Kernel formula: {kernel}")
-    print(f"  Optimizer restarts: {n_restarts}")
-    print(f"  Alpha regularization: {alpha}")
+    print(f"\nCreated GP with kernel: {kernel_type}")
+    print(f"Kernel formula: {kernel}")
+    print(f"Optimizer restarts: {n_restarts}")
+    print(f"Alpha regularization: {alpha}")
 
     return gp
 
@@ -319,14 +352,13 @@ def create_gp_model(
 def train_gp(
     X_train_scaled: np.ndarray,
     y_train_scaled: np.ndarray,
-    kernel_type: str = KERNEL_TYPE,
-    n_restarts: int = N_RESTARTS,
-    alpha: float = ALPHA,
+    kernel_type: str = DEFAULT_KERNEL,
+    n_restarts: int = DEFAULT_N_RESTARTS,
+    alpha: float = DEFAULT_ALPHA,
+    random_state: int = DEFAULT_RANDOM_STATE,
     verbose: bool = True,
-) -> Tuple[GaussianProcessRegressor, float]:
-    """
-    Train a Gaussian Process Regressor.
-    """
+) -> tuple[GaussianProcessRegressor, float]:
+    """Train the GP_max_abs_xr surrogate."""
     print("\n" + "=" * 70)
     print("TRAINING GP_MAX_ABS_XR")
     print("=" * 70)
@@ -336,6 +368,7 @@ def train_gp(
         n_dims=X_train_scaled.shape[1],
         n_restarts=n_restarts,
         alpha=alpha,
+        random_state=random_state,
     )
 
     print("\nFitting GP_max_abs_xr. This may take some time...")
@@ -343,31 +376,28 @@ def train_gp(
 
     gp.fit(X_train_scaled, y_train_scaled)
 
-    elapsed = time.time() - start_time
+    training_time_s = time.time() - start_time
+    log_marginal_likelihood = gp.log_marginal_likelihood(gp.kernel_.theta)
 
-    print(f"✓ Training completed in {elapsed:.1f} s")
-
-    lml = gp.log_marginal_likelihood(gp.kernel_.theta)
-    print(f"\nLog-Marginal-Likelihood: {lml:.3f}")
+    print(f"Training completed in {training_time_s:.1f} s")
+    print(f"Log-marginal likelihood: {log_marginal_likelihood:.3f}")
 
     if verbose:
         print("\nOptimized kernel:")
         print(f"  {gp.kernel_}")
 
-    return gp, elapsed
+    return gp, training_time_s
 
 
-# ============================================================================
+# =============================================================================
 # EVALUATION
-# ============================================================================
+# =============================================================================
 
-def regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
-    """
-    Compute regression metrics.
-    """
-    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
-    mae = mean_absolute_error(y_true, y_pred)
-    r2 = r2_score(y_true, y_pred)
+def regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
+    """Compute regression metrics."""
+    rmse = float(np.sqrt(mean_squared_error(y_true, y_pred)))
+    mae = float(mean_absolute_error(y_true, y_pred))
+    r2 = float(r2_score(y_true, y_pred))
 
     return {
         "rmse_m": rmse,
@@ -383,19 +413,20 @@ def evaluate_classification(
     y_pred: np.ndarray,
     limit: float,
     label: str,
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """
     Evaluate feasibility classification using max_abs_xr <= limit.
 
     False feasible is the most critical error:
-    predicted feasible but actually infeasible.
+    the surrogate predicts a sample as feasible while the simulator says it is
+    infeasible.
     """
     true_feasible = y_true <= limit
     pred_feasible = y_pred <= limit
 
-    accuracy = np.mean(true_feasible == pred_feasible)
-    false_feasible = np.mean((pred_feasible == True) & (true_feasible == False))
-    false_infeasible = np.mean((pred_feasible == False) & (true_feasible == True))
+    accuracy = float(np.mean(true_feasible == pred_feasible))
+    false_feasible = float(np.mean(pred_feasible & ~true_feasible))
+    false_infeasible = float(np.mean(~pred_feasible & true_feasible))
 
     tn, fp, fn, tp = confusion_matrix(
         true_feasible,
@@ -404,14 +435,14 @@ def evaluate_classification(
     ).ravel()
 
     return {
-        f"{label}_limit_m": limit,
+        f"{label}_limit_m": float(limit),
         f"{label}_classification_accuracy": accuracy,
         f"{label}_false_feasible_rate": false_feasible,
         f"{label}_false_infeasible_rate": false_infeasible,
-        f"{label}_true_infeasible_pred_infeasible": tn,
-        f"{label}_true_infeasible_pred_feasible": fp,
-        f"{label}_true_feasible_pred_infeasible": fn,
-        f"{label}_true_feasible_pred_feasible": tp,
+        f"{label}_true_infeasible_pred_infeasible": int(tn),
+        f"{label}_true_infeasible_pred_feasible": int(fp),
+        f"{label}_true_feasible_pred_infeasible": int(fn),
+        f"{label}_true_feasible_pred_feasible": int(tp),
     }
 
 
@@ -421,16 +452,14 @@ def evaluate_near_boundary(
     y_std: np.ndarray,
     low: float = NEAR_BOUNDARY_LOW,
     high: float = NEAR_BOUNDARY_HIGH,
-) -> Dict[str, float]:
-    """
-    Evaluate prediction quality near the absolute robot constraint boundary.
-    """
+) -> dict[str, float]:
+    """Evaluate prediction quality near the absolute robot constraint boundary."""
     mask = (y_true >= low) & (y_true <= high)
 
     if not np.any(mask):
         return {
-            "near_boundary_low_m": low,
-            "near_boundary_high_m": high,
+            "near_boundary_low_m": float(low),
+            "near_boundary_high_m": float(high),
             "near_boundary_n_samples": 0,
             "near_boundary_rmse_mm": np.nan,
             "near_boundary_mae_mm": np.nan,
@@ -452,16 +481,16 @@ def evaluate_near_boundary(
     )
 
     return {
-        "near_boundary_low_m": low,
-        "near_boundary_high_m": high,
-        "near_boundary_n_samples": len(y_true_nb),
-        "near_boundary_rmse_mm": reg["rmse_mm"],
-        "near_boundary_mae_mm": reg["mae_mm"],
-        "near_boundary_mean_std_mm": np.mean(y_std_nb) * 1000.0,
-        "near_boundary_classification_accuracy_true_limit": (
+        "near_boundary_low_m": float(low),
+        "near_boundary_high_m": float(high),
+        "near_boundary_n_samples": int(len(y_true_nb)),
+        "near_boundary_rmse_mm": float(reg["rmse_mm"]),
+        "near_boundary_mae_mm": float(reg["mae_mm"]),
+        "near_boundary_mean_std_mm": float(np.mean(y_std_nb) * 1000.0),
+        "near_boundary_classification_accuracy_true_limit": float(
             clf["near_boundary_true_limit_classification_accuracy"]
         ),
-        "near_boundary_false_feasible_rate_true_limit": (
+        "near_boundary_false_feasible_rate_true_limit": float(
             clf["near_boundary_true_limit_false_feasible_rate"]
         ),
     }
@@ -474,10 +503,8 @@ def evaluate_model(
     X_test_scaled: np.ndarray,
     y_test_scaled: np.ndarray,
     scaler_y: StandardScaler,
-) -> Dict[str, object]:
-    """
-    Evaluate the trained GP on training and test sets.
-    """
+) -> dict[str, Any]:
+    """Evaluate the trained GP on training and test sets."""
     print("\n" + "=" * 70)
     print("MODEL EVALUATION")
     print("=" * 70)
@@ -531,33 +558,33 @@ def evaluate_model(
         y_test_std,
     )
 
-    print("\n--- TRAINING SET ---")
-    print(f"  RMSE:  {train_metrics['rmse_m']:.6f} m  ({train_metrics['rmse_mm']:.3f} mm)")
-    print(f"  MAE:   {train_metrics['mae_m']:.6f} m  ({train_metrics['mae_mm']:.3f} mm)")
-    print(f"  R²:    {train_metrics['r2']:.6f}")
+    print("\nTraining set:")
+    print(f"  RMSE: {train_metrics['rmse_m']:.6f} m ({train_metrics['rmse_mm']:.3f} mm)")
+    print(f"  MAE:  {train_metrics['mae_m']:.6f} m ({train_metrics['mae_mm']:.3f} mm)")
+    print(f"  R²:   {train_metrics['r2']:.6f}")
 
-    print("\n--- TEST SET ---")
-    print(f"  RMSE:  {test_metrics['rmse_m']:.6f} m  ({test_metrics['rmse_mm']:.3f} mm)")
-    print(f"  MAE:   {test_metrics['mae_m']:.6f} m  ({test_metrics['mae_mm']:.3f} mm)")
-    print(f"  R²:    {test_metrics['r2']:.6f}")
+    print("\nTest set:")
+    print(f"  RMSE: {test_metrics['rmse_m']:.6f} m ({test_metrics['rmse_mm']:.3f} mm)")
+    print(f"  MAE:  {test_metrics['mae_m']:.6f} m ({test_metrics['mae_mm']:.3f} mm)")
+    print(f"  R²:   {test_metrics['r2']:.6f}")
 
-    print("\n--- PREDICTIVE UNCERTAINTY, TEST SET ---")
-    print(f"  Mean std: {y_test_std.mean():.6f} m ({y_test_std.mean() * 1000:.3f} mm)")
-    print(f"  Max std:  {y_test_std.max():.6f} m ({y_test_std.max() * 1000:.3f} mm)")
+    print("\nPredictive uncertainty on test set:")
+    print(f"  Mean std: {y_test_std.mean():.6f} m ({y_test_std.mean() * 1000.0:.3f} mm)")
+    print(f"  Max std:  {y_test_std.max():.6f} m ({y_test_std.max() * 1000.0:.3f} mm)")
 
-    print("\n--- ABSOLUTE CONSTRAINT CLASSIFICATION, TRUE LIMIT ---")
+    print("\nAbsolute constraint classification, true limit:")
     print(f"  Limit:             {ROBOT_LIMIT_TRUE:.3f} m")
-    print(f"  Accuracy:          {clf_true_limit['true_limit_classification_accuracy'] * 100:.2f}%")
-    print(f"  False feasible:    {clf_true_limit['true_limit_false_feasible_rate'] * 100:.2f}%")
-    print(f"  False infeasible:  {clf_true_limit['true_limit_false_infeasible_rate'] * 100:.2f}%")
+    print(f"  Accuracy:          {clf_true_limit['true_limit_classification_accuracy'] * 100.0:.2f}%")
+    print(f"  False feasible:    {clf_true_limit['true_limit_false_feasible_rate'] * 100.0:.2f}%")
+    print(f"  False infeasible:  {clf_true_limit['true_limit_false_infeasible_rate'] * 100.0:.2f}%")
 
-    print("\n--- ABSOLUTE CONSTRAINT CLASSIFICATION, OPTIMIZATION SAFETY LIMIT ---")
+    print("\nAbsolute constraint classification, optimization safety limit:")
     print(f"  Limit:             {ROBOT_LIMIT_OPT:.3f} m")
-    print(f"  Accuracy:          {clf_opt_limit['opt_limit_classification_accuracy'] * 100:.2f}%")
-    print(f"  False feasible:    {clf_opt_limit['opt_limit_false_feasible_rate'] * 100:.2f}%")
-    print(f"  False infeasible:  {clf_opt_limit['opt_limit_false_infeasible_rate'] * 100:.2f}%")
+    print(f"  Accuracy:          {clf_opt_limit['opt_limit_classification_accuracy'] * 100.0:.2f}%")
+    print(f"  False feasible:    {clf_opt_limit['opt_limit_false_feasible_rate'] * 100.0:.2f}%")
+    print(f"  False infeasible:  {clf_opt_limit['opt_limit_false_infeasible_rate'] * 100.0:.2f}%")
 
-    print("\n--- NEAR-BOUNDARY REGION ---")
+    print("\nNear-boundary region:")
     print(
         f"  Range:             "
         f"[{near_boundary_metrics['near_boundary_low_m']:.3f}, "
@@ -569,21 +596,21 @@ def evaluate_model(
     print(f"  Mean std:          {near_boundary_metrics['near_boundary_mean_std_mm']:.3f} mm")
     print(
         f"  Accuracy:          "
-        f"{near_boundary_metrics['near_boundary_classification_accuracy_true_limit'] * 100:.2f}%"
+        f"{near_boundary_metrics['near_boundary_classification_accuracy_true_limit'] * 100.0:.2f}%"
     )
     print(
         f"  False feasible:    "
-        f"{near_boundary_metrics['near_boundary_false_feasible_rate_true_limit'] * 100:.2f}%"
+        f"{near_boundary_metrics['near_boundary_false_feasible_rate_true_limit'] * 100.0:.2f}%"
     )
 
     if test_metrics["r2"] > 0.95:
-        print("\n✓ Excellent constraint surrogate accuracy: R² > 0.95")
+        print("\nExcellent constraint surrogate accuracy: R² > 0.95")
     elif test_metrics["r2"] > 0.85:
-        print("\n✓ Good constraint surrogate accuracy: R² > 0.85")
+        print("\nGood constraint surrogate accuracy: R² > 0.85")
     else:
-        print("\n⚠️ Constraint surrogate accuracy may need improvement.")
+        print("\nConstraint surrogate accuracy may need improvement.")
 
-    metrics = {
+    return {
         "train_rmse_m": train_metrics["rmse_m"],
         "train_rmse_mm": train_metrics["rmse_mm"],
         "train_mae_m": train_metrics["mae_m"],
@@ -594,10 +621,10 @@ def evaluate_model(
         "test_mae_m": test_metrics["mae_m"],
         "test_mae_mm": test_metrics["mae_mm"],
         "test_r2": test_metrics["r2"],
-        "test_mean_std_m": y_test_std.mean(),
-        "test_mean_std_mm": y_test_std.mean() * 1000.0,
-        "test_max_std_m": y_test_std.max(),
-        "test_max_std_mm": y_test_std.max() * 1000.0,
+        "test_mean_std_m": float(y_test_std.mean()),
+        "test_mean_std_mm": float(y_test_std.mean() * 1000.0),
+        "test_max_std_m": float(y_test_std.max()),
+        "test_max_std_mm": float(y_test_std.max() * 1000.0),
         **clf_true_limit,
         **clf_opt_limit,
         **near_boundary_metrics,
@@ -609,8 +636,6 @@ def evaluate_model(
         "y_test_std": y_test_std,
     }
 
-    return metrics
-
 
 def analyze_test_outliers(
     X_test_scaled: np.ndarray,
@@ -618,12 +643,10 @@ def analyze_test_outliers(
     y_test_pred: np.ndarray,
     y_test_std: np.ndarray,
     scaler_X: StandardScaler,
-    save_dir: str | Path = GP_CONSTRAINT_RESULTS_DIR,
+    save_dir: Path = GP_CONSTRAINT_RESULTS_DIR,
     top_n: int = 10,
 ) -> pd.DataFrame:
-    """
-    Analyze largest test errors for GP_max_abs_xr.
-    """
+    """Analyze the largest test errors for GP_max_abs_xr."""
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -646,10 +669,7 @@ def analyze_test_outliers(
     error_df["true_violation_abs_m"] = np.maximum(0.0, y_test_true - ROBOT_LIMIT_TRUE)
     error_df["pred_violation_abs_m"] = np.maximum(0.0, y_test_pred - ROBOT_LIMIT_TRUE)
 
-    error_df = error_df.sort_values(
-        "abs_error_m",
-        ascending=False,
-    ).reset_index(drop=True)
+    error_df = error_df.sort_values("abs_error_m", ascending=False).reset_index(drop=True)
 
     filepath = save_dir / "test_prediction_errors_max_abs_xr.csv"
     error_df.to_csv(filepath, index=False)
@@ -659,7 +679,7 @@ def analyze_test_outliers(
     print("=" * 70)
     print(f"Saved full error table to: {filepath}")
 
-    cols = [
+    display_cols = [
         "true_max_abs_xr",
         "pred_max_abs_xr",
         "error_mm",
@@ -679,29 +699,31 @@ def analyze_test_outliers(
     ]
 
     print(f"\nTop {top_n} largest absolute test errors:")
-    print(error_df[cols].head(top_n).to_string(index=False))
+    print(error_df[display_cols].head(top_n).to_string(index=False))
 
     false_feasible_df = error_df[
-        (error_df["pred_feasible_abs"] == True)
-        & (error_df["true_feasible_abs"] == False)
+        error_df["pred_feasible_abs"] & ~error_df["true_feasible_abs"]
     ]
 
     if len(false_feasible_df) > 0:
         print("\nFalse-feasible_abs test cases:")
-        print(false_feasible_df[cols].to_string(index=False))
+        print(false_feasible_df[display_cols].to_string(index=False))
     else:
         print("\nNo false-feasible_abs test cases.")
 
     return error_df
 
 
-# ============================================================================
+# =============================================================================
 # ARD ANALYSIS
-# ============================================================================
+# =============================================================================
 
 def extract_length_scales(gp: GaussianProcessRegressor) -> np.ndarray:
     """
-    Robustly extract ARD length-scales from optimized GP kernel.
+    Extract ARD length-scales from the optimized GP kernel.
+
+    Expected kernel structure:
+        (ConstantKernel * Matern/RBF) + WhiteKernel
     """
     kernel = gp.kernel_
 
@@ -717,16 +739,20 @@ def extract_length_scales(gp: GaussianProcessRegressor) -> np.ndarray:
 
     raise RuntimeError(
         "Could not extract length-scales from the GP kernel. "
-        "Check kernel structure."
+        "Check the optimized kernel structure."
     )
 
 
 def analyze_ard_relevance(
     gp: GaussianProcessRegressor,
-    param_names: Optional[list] = None,
+    param_names: list[str] | None = None,
 ) -> pd.DataFrame:
     """
     Analyze parameter relevance using ARD length-scales.
+
+    Relevance is computed as:
+
+        relevance_i = (1 / length_scale_i) / sum_j(1 / length_scale_j)
     """
     print("\n" + "=" * 70)
     print("ARD PARAMETER RELEVANCE: GP_MAX_ABS_XR")
@@ -746,7 +772,7 @@ def analyze_ard_relevance(
     relevance_raw = 1.0 / length_scales
     relevance_normalized = relevance_raw / relevance_raw.sum()
 
-    df = pd.DataFrame(
+    ard_df = pd.DataFrame(
         {
             "Parameter": param_names,
             "LengthScale": length_scales,
@@ -754,33 +780,33 @@ def analyze_ard_relevance(
         }
     )
 
-    df = df.sort_values("Relevance", ascending=False).reset_index(drop=True)
+    ard_df = ard_df.sort_values("Relevance", ascending=False).reset_index(drop=True)
 
     print("\n" + "-" * 70)
     print(f"{'Rank':<6}{'Parameter':<15}{'Length-scale':<18}{'Relevance':<15}")
     print("-" * 70)
 
-    for i, row in df.iterrows():
+    for rank, row in ard_df.iterrows():
         print(
-            f"{i + 1:<6}{row['Parameter']:<15}"
+            f"{rank + 1:<6}{row['Parameter']:<15}"
             f"{row['LengthScale']:<18.6f}{row['Relevance']:<15.4f}"
         )
 
     print("-" * 70)
 
-    print("\n✓ Top 3 most influential parameters for max_abs_xr:")
-    for i in range(min(3, len(df))):
+    print("\nTop 3 most influential parameters for max_abs_xr:")
+    for i in range(min(3, len(ard_df))):
         print(
-            f"  {i + 1}. {df.iloc[i]['Parameter']:12s} "
-            f"(relevance: {df.iloc[i]['Relevance']:.3f})"
+            f"  {i + 1}. {ard_df.iloc[i]['Parameter']:12s} "
+            f"(relevance: {ard_df.iloc[i]['Relevance']:.3f})"
         )
 
-    return df
+    return ard_df
 
 
-# ============================================================================
+# =============================================================================
 # VISUALIZATION
-# ============================================================================
+# =============================================================================
 
 def plot_training_results(
     y_train_true: np.ndarray,
@@ -789,21 +815,59 @@ def plot_training_results(
     y_test_true: np.ndarray,
     y_test_pred: np.ndarray,
     y_test_std: np.ndarray,
-    metrics: Dict[str, object],
-    save_dir: str | Path = GP_CONSTRAINT_FIGURES_DIR,
+    metrics: dict[str, Any],
+    save_dir: Path = GP_CONSTRAINT_FIGURES_DIR,
 ) -> None:
     """
     Generate GP_max_abs_xr diagnostic plots.
+
+    Generated figures:
+    - max_abs_xr_parity_plot.png
+    - max_abs_xr_residuals.png
+    - max_abs_xr_uncertainty.png
     """
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    # ----------------------------------------------------------------------
-    # Plot 1: parity plot
-    # ----------------------------------------------------------------------
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 7))
+    plot_parity(
+        y_train_true=y_train_true,
+        y_train_pred=y_train_pred,
+        y_test_true=y_test_true,
+        y_test_pred=y_test_pred,
+        metrics=metrics,
+        save_dir=save_dir,
+    )
 
-    ax1.scatter(
+    plot_residuals(
+        y_train_true=y_train_true,
+        y_train_pred=y_train_pred,
+        y_test_true=y_test_true,
+        y_test_pred=y_test_pred,
+        metrics=metrics,
+        save_dir=save_dir,
+    )
+
+    plot_uncertainty(
+        y_test_true=y_test_true,
+        y_test_pred=y_test_pred,
+        y_test_std=y_test_std,
+        save_dir=save_dir,
+    )
+
+
+def plot_parity(
+    y_train_true: np.ndarray,
+    y_train_pred: np.ndarray,
+    y_test_true: np.ndarray,
+    y_test_pred: np.ndarray,
+    metrics: dict[str, Any],
+    save_dir: Path,
+) -> None:
+    """Generate train/test parity plots."""
+    fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+
+    ax = axes[0]
+    ax.scatter(
         y_train_true,
         y_train_pred,
         alpha=0.6,
@@ -813,27 +877,21 @@ def plot_training_results(
         label="Train",
     )
 
-    min_train = min(y_train_true.min(), y_train_pred.min())
-    max_train = max(y_train_true.max(), y_train_pred.max())
+    min_train = min(float(y_train_true.min()), float(y_train_pred.min()))
+    max_train = max(float(y_train_true.max()), float(y_train_pred.max()))
 
-    ax1.plot(
-        [min_train, max_train],
-        [min_train, max_train],
-        "--",
-        linewidth=2,
-        label="Identity",
-    )
+    ax.plot([min_train, max_train], [min_train, max_train], linestyle="--", linewidth=2, label="Identity")
+    ax.axhline(ROBOT_LIMIT_TRUE, linestyle=":", linewidth=2, label="Robot limit")
+    ax.axvline(ROBOT_LIMIT_TRUE, linestyle=":", linewidth=2)
 
-    ax1.axhline(ROBOT_LIMIT_TRUE, linestyle=":", linewidth=2, label="Robot limit")
-    ax1.axvline(ROBOT_LIMIT_TRUE, linestyle=":", linewidth=2)
+    ax.set_xlabel(r"True $x_{r,\max}^{\mathrm{sim}}$ [m]")
+    ax.set_ylabel(r"Predicted $x_{r,\max}^{\mathrm{sim}}$ [m]")
+    ax.set_title(f"Training set (R² = {metrics['train_r2']:.4f})")
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3)
 
-    ax1.set_xlabel("True max_abs_xr [m]")
-    ax1.set_ylabel("Predicted max_abs_xr [m]")
-    ax1.set_title(f"Training Set (R² = {metrics['train_r2']:.4f})")
-    ax1.legend(fontsize=9)
-    ax1.grid(True, alpha=0.3)
-
-    ax2.scatter(
+    ax = axes[1]
+    ax.scatter(
         y_test_true,
         y_test_pred,
         alpha=0.6,
@@ -843,95 +901,103 @@ def plot_training_results(
         label="Test",
     )
 
-    min_test = min(y_test_true.min(), y_test_pred.min())
-    max_test = max(y_test_true.max(), y_test_pred.max())
+    min_test = min(float(y_test_true.min()), float(y_test_pred.min()))
+    max_test = max(float(y_test_true.max()), float(y_test_pred.max()))
 
-    ax2.plot(
-        [min_test, max_test],
-        [min_test, max_test],
-        "--",
-        linewidth=2,
-        label="Identity",
-    )
+    ax.plot([min_test, max_test], [min_test, max_test], linestyle="--", linewidth=2, label="Identity")
+    ax.axhline(ROBOT_LIMIT_TRUE, linestyle=":", linewidth=2, label="Robot limit")
+    ax.axvline(ROBOT_LIMIT_TRUE, linestyle=":", linewidth=2)
 
-    ax2.axhline(ROBOT_LIMIT_TRUE, linestyle=":", linewidth=2, label="Robot limit")
-    ax2.axvline(ROBOT_LIMIT_TRUE, linestyle=":", linewidth=2)
+    ax.set_xlabel(r"True $x_{r,\max}^{\mathrm{sim}}$ [m]")
+    ax.set_ylabel(r"Predicted $x_{r,\max}^{\mathrm{sim}}$ [m]")
+    ax.set_title(f"Test set (R² = {metrics['test_r2']:.4f})")
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3)
 
-    ax2.set_xlabel("True max_abs_xr [m]")
-    ax2.set_ylabel("Predicted max_abs_xr [m]")
-    ax2.set_title(f"Test Set (R² = {metrics['test_r2']:.4f})")
-    ax2.legend(fontsize=9)
-    ax2.grid(True, alpha=0.3)
-
-    plt.suptitle("Parity Plot: GP_max_abs_xr Constraint Surrogate", fontsize=15)
-    plt.tight_layout()
+    fig.suptitle("Parity plot: GP constraint surrogate", fontsize=15)
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
 
     filepath = save_dir / "max_abs_xr_parity_plot.png"
-    plt.savefig(filepath, dpi=300, bbox_inches="tight")
-    print(f"✓ Saved: {filepath}")
-    plt.close()
+    fig.savefig(filepath, dpi=300, bbox_inches="tight")
+    plt.close(fig)
 
-    # ----------------------------------------------------------------------
-    # Plot 2: residuals
-    # ----------------------------------------------------------------------
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 7))
+    print(f"Saved: {filepath}")
 
-    residuals_train = y_train_pred - y_train_true
-    residuals_test = y_test_pred - y_test_true
 
-    ax1.scatter(
+def plot_residuals(
+    y_train_true: np.ndarray,
+    y_train_pred: np.ndarray,
+    y_test_true: np.ndarray,
+    y_test_pred: np.ndarray,
+    metrics: dict[str, Any],
+    save_dir: Path,
+) -> None:
+    """Generate train/test residual plots."""
+    residuals_train_mm = (y_train_pred - y_train_true) * 1000.0
+    residuals_test_mm = (y_test_pred - y_test_true) * 1000.0
+
+    fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+
+    ax = axes[0]
+    ax.scatter(
         y_train_pred,
-        residuals_train * 1000.0,
+        residuals_train_mm,
         alpha=0.6,
         s=50,
         edgecolors="black",
         linewidth=0.5,
     )
+    ax.axhline(0.0, linestyle="--", linewidth=2)
+    ax.axvline(ROBOT_LIMIT_TRUE, linestyle=":", linewidth=2, label="Robot limit")
+    ax.set_xlabel(r"Predicted $x_{r,\max}^{\mathrm{sim}}$ [m]")
+    ax.set_ylabel("Residual [mm]")
+    ax.set_title(f"Training residuals (RMSE = {metrics['train_rmse_mm']:.2f} mm)")
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3)
 
-    ax1.axhline(0.0, linestyle="--", linewidth=2)
-    ax1.axvline(ROBOT_LIMIT_TRUE, linestyle=":", linewidth=2, label="Robot limit")
-    ax1.set_xlabel("Predicted max_abs_xr [m]")
-    ax1.set_ylabel("Residual [mm]")
-    ax1.set_title(f"Training residuals (RMSE = {metrics['train_rmse_mm']:.2f} mm)")
-    ax1.legend(fontsize=9)
-    ax1.grid(True, alpha=0.3)
-
-    ax2.scatter(
+    ax = axes[1]
+    ax.scatter(
         y_test_pred,
-        residuals_test * 1000.0,
+        residuals_test_mm,
         alpha=0.6,
         s=50,
         edgecolors="black",
         linewidth=0.5,
     )
+    ax.axhline(0.0, linestyle="--", linewidth=2)
+    ax.axvline(ROBOT_LIMIT_TRUE, linestyle=":", linewidth=2, label="Robot limit")
+    ax.set_xlabel(r"Predicted $x_{r,\max}^{\mathrm{sim}}$ [m]")
+    ax.set_ylabel("Residual [mm]")
+    ax.set_title(f"Test residuals (RMSE = {metrics['test_rmse_mm']:.2f} mm)")
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3)
 
-    ax2.axhline(0.0, linestyle="--", linewidth=2)
-    ax2.axvline(ROBOT_LIMIT_TRUE, linestyle=":", linewidth=2, label="Robot limit")
-    ax2.set_xlabel("Predicted max_abs_xr [m]")
-    ax2.set_ylabel("Residual [mm]")
-    ax2.set_title(f"Test residuals (RMSE = {metrics['test_rmse_mm']:.2f} mm)")
-    ax2.legend(fontsize=9)
-    ax2.grid(True, alpha=0.3)
-
-    plt.suptitle("Residual Analysis: GP_max_abs_xr", fontsize=15)
-    plt.tight_layout()
+    fig.suptitle("Residual analysis: GP constraint surrogate", fontsize=15)
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
 
     filepath = save_dir / "max_abs_xr_residuals.png"
-    plt.savefig(filepath, dpi=300, bbox_inches="tight")
-    print(f"✓ Saved: {filepath}")
-    plt.close()
+    fig.savefig(filepath, dpi=300, bbox_inches="tight")
+    plt.close(fig)
 
-    # ----------------------------------------------------------------------
-    # Plot 3: uncertainty
-    # ----------------------------------------------------------------------
-    fig, ax = plt.subplots(figsize=(14, 8))
+    print(f"Saved: {filepath}")
 
+
+def plot_uncertainty(
+    y_test_true: np.ndarray,
+    y_test_pred: np.ndarray,
+    y_test_std: np.ndarray,
+    save_dir: Path,
+) -> None:
+    """Generate predictive uncertainty plot for the test set."""
     idx_sorted = np.argsort(y_test_true)
+
     y_true_sorted = y_test_true[idx_sorted]
     y_pred_sorted = y_test_pred[idx_sorted]
     y_std_sorted = y_test_std[idx_sorted]
 
     x = np.arange(len(y_test_true))
+
+    fig, ax = plt.subplots(figsize=(14, 8))
 
     ax.plot(x, y_true_sorted, linewidth=2, label="True max_abs_xr")
     ax.plot(x, y_pred_sorted, linewidth=2, label="Predicted max_abs_xr")
@@ -949,26 +1015,24 @@ def plot_training_results(
 
     ax.set_xlabel("Test sample, sorted by true max_abs_xr")
     ax.set_ylabel("max_abs_xr [m]")
-    ax.set_title("GP_max_abs_xr Predictions with Predictive Uncertainty")
+    ax.set_title("GP constraint predictions with predictive uncertainty")
     ax.legend(fontsize=9)
     ax.grid(True, alpha=0.3)
 
-    plt.tight_layout()
-
     filepath = save_dir / "max_abs_xr_uncertainty.png"
-    plt.savefig(filepath, dpi=300, bbox_inches="tight")
-    print(f"✓ Saved: {filepath}")
-    plt.close()
+    fig.tight_layout()
+    fig.savefig(filepath, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+    print(f"Saved: {filepath}")
 
 
 def plot_classification_summary(
     y_test_true: np.ndarray,
     y_test_pred: np.ndarray,
-    save_dir: str | Path = GP_CONSTRAINT_FIGURES_DIR,
+    save_dir: Path = GP_CONSTRAINT_FIGURES_DIR,
 ) -> None:
-    """
-    Plot constraint classification confusion matrices for true and safety limits.
-    """
+    """Plot constraint-classification confusion matrices."""
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1012,22 +1076,21 @@ def plot_classification_summary(
         ax.set_xlabel("Predicted class")
         ax.set_ylabel("True class")
 
-    plt.suptitle("Absolute Constraint Classification Confusion Matrices")
-    plt.tight_layout()
+    fig.suptitle("Absolute constraint classification confusion matrices")
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
 
     filepath = save_dir / "max_abs_xr_constraint_classification.png"
-    plt.savefig(filepath, dpi=300, bbox_inches="tight")
-    print(f"✓ Saved: {filepath}")
-    plt.close()
+    fig.savefig(filepath, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+    print(f"Saved: {filepath}")
 
 
 def plot_ard_relevance(
     ard_df: pd.DataFrame,
-    save_dir: str | Path = GP_CONSTRAINT_FIGURES_DIR,
+    save_dir: Path = GP_CONSTRAINT_FIGURES_DIR,
 ) -> None:
-    """
-    Generate ARD parameter relevance bar plot.
-    """
+    """Generate ARD parameter relevance bar plot."""
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1053,128 +1116,22 @@ def plot_ard_relevance(
         )
 
     ax.set_ylabel("Normalized relevance")
-    ax.set_title("ARD Parameter Relevance: GP_max_abs_xr")
-    ax.set_ylim(0, ard_df["Relevance"].max() * 1.15)
+    ax.set_title("ARD parameter relevance: GP constraint surrogate")
+    ax.set_ylim(0.0, ard_df["Relevance"].max() * 1.15)
     ax.grid(True, alpha=0.3, axis="y")
-    plt.xticks(rotation=45, ha="right")
-
-    plt.tight_layout()
+    ax.tick_params(axis="x", rotation=45)
 
     filepath = save_dir / "max_abs_xr_ard_relevance.png"
-    plt.savefig(filepath, dpi=300, bbox_inches="tight")
-    print(f"✓ Saved: {filepath}")
-    plt.close()
+    fig.tight_layout()
+    fig.savefig(filepath, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+    print(f"Saved: {filepath}")
 
 
-# ============================================================================
+# =============================================================================
 # SAVE AND LOAD MODEL
-# ============================================================================
-
-def save_model(
-    gp: GaussianProcessRegressor,
-    scaler_X: StandardScaler,
-    scaler_y: StandardScaler,
-    metrics: Dict[str, object],
-    ard_df: pd.DataFrame,
-    kernel_type: str,
-    alpha: float,
-    training_time_s: float,
-    save_dir: str | Path = GP_CONSTRAINT_RESULTS_DIR,
-) -> None:
-    """
-    Save trained GP_max_abs_xr model, scalers, metrics, ARD and model info.
-    """
-    save_dir = Path(save_dir)
-    save_dir.mkdir(parents=True, exist_ok=True)
-
-    joblib.dump(gp, save_dir / "gp_max_abs_xr_model.pkl")
-    print(f"✓ GP_max_abs_xr saved: {save_dir / 'gp_max_abs_xr_model.pkl'}")
-
-    joblib.dump(scaler_X, save_dir / "scaler_X_max_abs_xr.pkl")
-    joblib.dump(scaler_y, save_dir / "scaler_y_max_abs_xr.pkl")
-    print(f"✓ Scalers saved in: {save_dir}")
-
-    metrics_clean = {
-        k: v for k, v in metrics.items()
-        if not isinstance(v, np.ndarray)
-    }
-
-    metrics_clean["model"] = "GP_max_abs_xr"
-    metrics_clean["target"] = TARGET_COLUMN
-    metrics_clean["kernel_type"] = kernel_type
-    metrics_clean["alpha"] = alpha
-    metrics_clean["n_restarts"] = N_RESTARTS
-    metrics_clean["training_time_s"] = training_time_s
-    metrics_clean["optimized_kernel"] = str(gp.kernel_)
-
-    pd.DataFrame([metrics_clean]).to_csv(
-        save_dir / "metrics_max_abs_xr.csv",
-        index=False,
-    )
-    print(f"✓ Metrics saved: {save_dir / 'metrics_max_abs_xr.csv'}")
-
-    ard_df.to_csv(save_dir / "ard_relevance_max_abs_xr.csv", index=False)
-    print(f"✓ ARD saved: {save_dir / 'ard_relevance_max_abs_xr.csv'}")
-
-    with open(save_dir / "model_info_max_abs_xr.txt", "w", encoding="utf-8") as f:
-        f.write("Gaussian Process Absolute Constraint Surrogate Model\n")
-        f.write("=" * 60 + "\n")
-        f.write("Target: max_abs_xr\n")
-        f.write("Constraint interpretation: max_abs_xr <= 0.5 m\n")
-        f.write(f"Input parameters: {INPUT_COLUMNS}\n")
-        f.write(f"Kernel type: {kernel_type}\n")
-        f.write(f"Alpha: {alpha}\n")
-        f.write(f"Optimizer restarts: {N_RESTARTS}\n")
-        f.write(f"Training time: {training_time_s:.2f} s\n")
-        f.write("\nOptimized kernel:\n")
-        f.write(str(gp.kernel_) + "\n")
-        f.write("\nTest regression metrics:\n")
-        f.write(f"R2:   {metrics['test_r2']:.6f}\n")
-        f.write(f"RMSE: {metrics['test_rmse_m']:.6f} m ({metrics['test_rmse_mm']:.3f} mm)\n")
-        f.write(f"MAE:  {metrics['test_mae_m']:.6f} m ({metrics['test_mae_mm']:.3f} mm)\n")
-        f.write("\nConstraint classification, true limit:\n")
-        f.write(f"Accuracy: {metrics['true_limit_classification_accuracy'] * 100:.2f}%\n")
-        f.write(f"False feasible: {metrics['true_limit_false_feasible_rate'] * 100:.2f}%\n")
-        f.write(f"False infeasible: {metrics['true_limit_false_infeasible_rate'] * 100:.2f}%\n")
-        f.write("\nNear-boundary metrics:\n")
-        f.write(f"Range: [{NEAR_BOUNDARY_LOW:.3f}, {NEAR_BOUNDARY_HIGH:.3f}] m\n")
-        f.write(f"Samples: {metrics['near_boundary_n_samples']}\n")
-        f.write(f"RMSE: {metrics['near_boundary_rmse_mm']:.3f} mm\n")
-        f.write(
-            f"False feasible: "
-            f"{metrics['near_boundary_false_feasible_rate_true_limit'] * 100:.2f}%\n"
-        )
-
-    print(f"✓ Model info saved: {save_dir / 'model_info_max_abs_xr.txt'}")
-
-
-def load_model_max_abs_xr(
-    save_dir: str | Path = GP_CONSTRAINT_RESULTS_DIR,
-) -> Tuple[GaussianProcessRegressor, StandardScaler, StandardScaler]:
-    """
-    Load trained GP_max_abs_xr model and scalers.
-    """
-    save_dir = Path(save_dir)
-
-    gp = joblib.load(save_dir / "gp_max_abs_xr_model.pkl")
-    scaler_X = joblib.load(save_dir / "scaler_X_max_abs_xr.pkl")
-    scaler_y = joblib.load(save_dir / "scaler_y_max_abs_xr.pkl")
-
-    print(f"✓ GP_max_abs_xr loaded from: {save_dir}")
-
-    return gp, scaler_X, scaler_y
-
-
-def load_model_max_xr(
-    save_dir: str | Path = GP_CONSTRAINT_RESULTS_DIR,
-) -> Tuple[GaussianProcessRegressor, StandardScaler, StandardScaler]:
-    """
-    Backward-compatible wrapper for older scripts.
-
-    New code should use load_model_max_abs_xr().
-    """
-    return load_model_max_abs_xr(save_dir=save_dir)
-
+# =============================================================================
 
 def save_test_predictions(
     X_test_scaled: np.ndarray,
@@ -1182,11 +1139,9 @@ def save_test_predictions(
     y_test_pred: np.ndarray,
     y_test_std: np.ndarray,
     scaler_X: StandardScaler,
-    save_dir: str | Path = GP_CONSTRAINT_RESULTS_DIR,
+    save_dir: Path = GP_CONSTRAINT_RESULTS_DIR,
 ) -> None:
-    """
-    Save detailed test predictions for GP_max_abs_xr.
-    """
+    """Save detailed test predictions for GP_max_abs_xr."""
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1221,27 +1176,198 @@ def save_test_predictions(
     path = save_dir / "test_predictions_max_abs_xr.csv"
     predictions_df.to_csv(path, index=False)
 
-    print(f"✓ Test predictions saved: {path}")
+    print(f"Test predictions saved: {path}")
 
 
-# ============================================================================
+def save_model(
+    gp: GaussianProcessRegressor,
+    scaler_X: StandardScaler,
+    scaler_y: StandardScaler,
+    metrics: dict[str, Any],
+    ard_df: pd.DataFrame,
+    kernel_type: str,
+    alpha: float,
+    n_restarts: int,
+    training_time_s: float,
+    save_dir: Path = GP_CONSTRAINT_RESULTS_DIR,
+) -> None:
+    """Save trained GP_max_abs_xr model, scalers, metrics, ARD and model info."""
+    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    model_path = save_dir / "gp_max_abs_xr_model.pkl"
+    scaler_x_path = save_dir / "scaler_X_max_abs_xr.pkl"
+    scaler_y_path = save_dir / "scaler_y_max_abs_xr.pkl"
+    metrics_path = save_dir / "metrics_max_abs_xr.csv"
+    ard_path = save_dir / "ard_relevance_max_abs_xr.csv"
+    info_path = save_dir / "model_info_max_abs_xr.txt"
+
+    joblib.dump(gp, model_path)
+    joblib.dump(scaler_X, scaler_x_path)
+    joblib.dump(scaler_y, scaler_y_path)
+
+    metrics_clean = {
+        key: value
+        for key, value in metrics.items()
+        if not isinstance(value, np.ndarray)
+    }
+
+    metrics_clean["model"] = "GP_max_abs_xr"
+    metrics_clean["target"] = TARGET_COLUMN
+    metrics_clean["kernel_type"] = kernel_type
+    metrics_clean["alpha"] = alpha
+    metrics_clean["n_restarts"] = n_restarts
+    metrics_clean["training_time_s"] = training_time_s
+    metrics_clean["optimized_kernel"] = str(gp.kernel_)
+
+    pd.DataFrame([metrics_clean]).to_csv(metrics_path, index=False)
+    ard_df.to_csv(ard_path, index=False)
+
+    with info_path.open("w", encoding="utf-8") as file:
+        file.write("Gaussian Process Absolute Constraint Surrogate Model\n")
+        file.write("=" * 60 + "\n")
+        file.write("Target: max_abs_xr\n")
+        file.write("Constraint interpretation: max_abs_xr <= 0.500 m\n")
+        file.write(f"Input parameters: {INPUT_COLUMNS}\n")
+        file.write(f"Kernel type: {kernel_type}\n")
+        file.write(f"Alpha: {alpha}\n")
+        file.write(f"Optimizer restarts: {n_restarts}\n")
+        file.write(f"Training time: {training_time_s:.2f} s\n")
+        file.write("\nOptimized kernel:\n")
+        file.write(str(gp.kernel_) + "\n")
+        file.write("\nTest regression metrics:\n")
+        file.write(f"R2:   {metrics['test_r2']:.6f}\n")
+        file.write(f"RMSE: {metrics['test_rmse_m']:.6f} m ({metrics['test_rmse_mm']:.3f} mm)\n")
+        file.write(f"MAE:  {metrics['test_mae_m']:.6f} m ({metrics['test_mae_mm']:.3f} mm)\n")
+        file.write("\nConstraint classification, true limit:\n")
+        file.write(f"Accuracy: {metrics['true_limit_classification_accuracy'] * 100.0:.2f}%\n")
+        file.write(f"False feasible: {metrics['true_limit_false_feasible_rate'] * 100.0:.2f}%\n")
+        file.write(f"False infeasible: {metrics['true_limit_false_infeasible_rate'] * 100.0:.2f}%\n")
+        file.write("\nNear-boundary metrics:\n")
+        file.write(f"Range: [{NEAR_BOUNDARY_LOW:.3f}, {NEAR_BOUNDARY_HIGH:.3f}] m\n")
+        file.write(f"Samples: {metrics['near_boundary_n_samples']}\n")
+        file.write(f"RMSE: {metrics['near_boundary_rmse_mm']:.3f} mm\n")
+        file.write(
+            f"False feasible: "
+            f"{metrics['near_boundary_false_feasible_rate_true_limit'] * 100.0:.2f}%\n"
+        )
+
+    print(f"GP_max_abs_xr model saved: {model_path}")
+    print(f"Input scaler saved: {scaler_x_path}")
+    print(f"Output scaler saved: {scaler_y_path}")
+    print(f"Metrics saved: {metrics_path}")
+    print(f"ARD relevance saved: {ard_path}")
+    print(f"Model info saved: {info_path}")
+
+
+def load_model_max_abs_xr(
+    save_dir: Path | str = GP_CONSTRAINT_RESULTS_DIR,
+) -> tuple[GaussianProcessRegressor, StandardScaler, StandardScaler]:
+    """Load trained GP_max_abs_xr model and scalers."""
+    save_dir = Path(save_dir)
+
+    model_path = save_dir / "gp_max_abs_xr_model.pkl"
+    scaler_x_path = save_dir / "scaler_X_max_abs_xr.pkl"
+    scaler_y_path = save_dir / "scaler_y_max_abs_xr.pkl"
+
+    require_file(model_path)
+    require_file(scaler_x_path)
+    require_file(scaler_y_path)
+
+    gp = joblib.load(model_path)
+    scaler_X = joblib.load(scaler_x_path)
+    scaler_y = joblib.load(scaler_y_path)
+
+    print(f"GP_max_abs_xr loaded from: {save_dir}")
+
+    return gp, scaler_X, scaler_y
+
+
+def load_model_max_xr(
+    save_dir: Path | str = GP_CONSTRAINT_RESULTS_DIR,
+) -> tuple[GaussianProcessRegressor, StandardScaler, StandardScaler]:
+    """
+    Backward-compatible wrapper for older scripts.
+
+    New code should use load_model_max_abs_xr().
+    """
+    return load_model_max_abs_xr(save_dir=save_dir)
+
+
+# =============================================================================
 # MAIN TRAINING PIPELINE
-# ============================================================================
+# =============================================================================
+
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Train a GP constraint surrogate for max_abs_xr."
+    )
+
+    parser.add_argument(
+        "--dataset",
+        type=Path,
+        default=DEFAULT_DATASET_PATH,
+        help=f"Dataset path. Default: {DEFAULT_DATASET_PATH}.",
+    )
+
+    parser.add_argument(
+        "--kernel",
+        type=str,
+        default=DEFAULT_KERNEL,
+        choices=SUPPORTED_KERNELS,
+        help=f"Kernel type. Default: {DEFAULT_KERNEL}.",
+    )
+
+    parser.add_argument(
+        "--alpha",
+        type=float,
+        default=DEFAULT_ALPHA,
+        help=f"Alpha regularization. Default: {DEFAULT_ALPHA}.",
+    )
+
+    parser.add_argument(
+        "--n_restarts",
+        type=int,
+        default=DEFAULT_N_RESTARTS,
+        help=f"Number of optimizer restarts. Default: {DEFAULT_N_RESTARTS}.",
+    )
+
+    parser.add_argument(
+        "--test_size",
+        type=float,
+        default=DEFAULT_TEST_SIZE,
+        help=f"Test fraction. Default: {DEFAULT_TEST_SIZE}.",
+    )
+
+    parser.add_argument(
+        "--random_state",
+        type=int,
+        default=DEFAULT_RANDOM_STATE,
+        help=f"Random state. Default: {DEFAULT_RANDOM_STATE}.",
+    )
+
+    parser.add_argument(
+        "--no_plots",
+        action="store_true",
+        help="Skip diagnostic plots.",
+    )
+
+    return parser.parse_args()
+
 
 def main() -> None:
-    """
-    Run the GP_max_abs_xr training pipeline.
-    """
+    """Run the GP_max_abs_xr training pipeline."""
+    args = parse_args()
+    ensure_dirs()
+
     print("\n" + "=" * 70)
     print("GAUSSIAN PROCESS REGRESSION - GP_MAX_ABS_XR TRAINING PIPELINE")
     print("=" * 70 + "\n")
 
-    # 1. Load dataset
-    X, y, df = load_constraint_dataset(DATASET_PATH)
-
+    X, y, df = load_constraint_dataset(args.dataset)
     print_dataset_summary(df)
 
-    # 2. Preprocessing
     (
         X_train_scaled,
         X_test_scaled,
@@ -1249,37 +1375,35 @@ def main() -> None:
         y_test_scaled,
         scaler_X,
         scaler_y,
-        y_train,
-        y_test,
+        _,
+        _,
     ) = prepare_data(
-        X,
-        y,
-        test_size=TEST_SIZE,
-        random_state=RANDOM_STATE,
+        X=X,
+        y=y,
+        test_size=args.test_size,
+        random_state=args.random_state,
     )
 
-    # 3. GP training
     gp, training_time_s = train_gp(
-        X_train_scaled,
-        y_train_scaled,
-        kernel_type=KERNEL_TYPE,
-        n_restarts=N_RESTARTS,
-        alpha=ALPHA,
+        X_train_scaled=X_train_scaled,
+        y_train_scaled=y_train_scaled,
+        kernel_type=args.kernel,
+        n_restarts=args.n_restarts,
+        alpha=args.alpha,
+        random_state=args.random_state,
         verbose=True,
     )
 
-    # 4. Evaluation
     metrics = evaluate_model(
-        gp,
-        X_train_scaled,
-        y_train_scaled,
-        X_test_scaled,
-        y_test_scaled,
-        scaler_y,
+        gp=gp,
+        X_train_scaled=X_train_scaled,
+        y_train_scaled=y_train_scaled,
+        X_test_scaled=X_test_scaled,
+        y_test_scaled=y_test_scaled,
+        scaler_y=scaler_y,
     )
 
-    # 5. Test outlier analysis
-    error_df = analyze_test_outliers(
+    analyze_test_outliers(
         X_test_scaled=X_test_scaled,
         y_test_true=metrics["y_test_true"],
         y_test_pred=metrics["y_test_pred"],
@@ -1289,38 +1413,36 @@ def main() -> None:
         top_n=10,
     )
 
-    # 6. ARD analysis
     ard_df = analyze_ard_relevance(
-        gp,
+        gp=gp,
         param_names=INPUT_COLUMNS,
     )
 
-    # 7. Plots
-    print("\nGenerating plots...")
+    if not args.no_plots:
+        print("\nGenerating plots...")
 
-    plot_training_results(
-        y_train_true=metrics["y_train_true"],
-        y_train_pred=metrics["y_train_pred"],
-        y_train_std=metrics["y_train_std"],
-        y_test_true=metrics["y_test_true"],
-        y_test_pred=metrics["y_test_pred"],
-        y_test_std=metrics["y_test_std"],
-        metrics=metrics,
-        save_dir=GP_CONSTRAINT_FIGURES_DIR,
-    )
+        plot_training_results(
+            y_train_true=metrics["y_train_true"],
+            y_train_pred=metrics["y_train_pred"],
+            y_train_std=metrics["y_train_std"],
+            y_test_true=metrics["y_test_true"],
+            y_test_pred=metrics["y_test_pred"],
+            y_test_std=metrics["y_test_std"],
+            metrics=metrics,
+            save_dir=GP_CONSTRAINT_FIGURES_DIR,
+        )
 
-    plot_classification_summary(
-        y_test_true=metrics["y_test_true"],
-        y_test_pred=metrics["y_test_pred"],
-        save_dir=GP_CONSTRAINT_FIGURES_DIR,
-    )
+        plot_classification_summary(
+            y_test_true=metrics["y_test_true"],
+            y_test_pred=metrics["y_test_pred"],
+            save_dir=GP_CONSTRAINT_FIGURES_DIR,
+        )
 
-    plot_ard_relevance(
-        ard_df,
-        save_dir=GP_CONSTRAINT_FIGURES_DIR,
-    )
+        plot_ard_relevance(
+            ard_df=ard_df,
+            save_dir=GP_CONSTRAINT_FIGURES_DIR,
+        )
 
-    # 8. Save model and results
     save_test_predictions(
         X_test_scaled=X_test_scaled,
         y_test_true=metrics["y_test_true"],
@@ -1336,48 +1458,33 @@ def main() -> None:
         scaler_y=scaler_y,
         metrics=metrics,
         ard_df=ard_df,
-        kernel_type=KERNEL_TYPE,
-        alpha=ALPHA,
+        kernel_type=args.kernel,
+        alpha=args.alpha,
+        n_restarts=args.n_restarts,
         training_time_s=training_time_s,
         save_dir=GP_CONSTRAINT_RESULTS_DIR,
     )
 
-    # Final summary
     print("\n" + "=" * 70)
     print("GP_MAX_ABS_XR TRAINING COMPLETED")
     print("=" * 70)
 
-    print("\nFINAL METRICS:")
+    print("\nFinal metrics:")
     print(f"  Test R²:                  {metrics['test_r2']:.4f}")
-    print(
-        f"  Test RMSE:                {metrics['test_rmse_m']:.6f} m "
-        f"({metrics['test_rmse_mm']:.2f} mm)"
-    )
-    print(
-        f"  Test MAE:                 {metrics['test_mae_m']:.6f} m "
-        f"({metrics['test_mae_mm']:.2f} mm)"
-    )
-    print(
-        f"  Classification accuracy:  "
-        f"{metrics['true_limit_classification_accuracy'] * 100:.2f}%"
-    )
-    print(
-        f"  False feasible rate:      "
-        f"{metrics['true_limit_false_feasible_rate'] * 100:.2f}%"
-    )
-    print(
-        f"  Near-boundary RMSE:       "
-        f"{metrics['near_boundary_rmse_mm']:.2f} mm"
-    )
+    print(f"  Test RMSE:                {metrics['test_rmse_m']:.6f} m ({metrics['test_rmse_mm']:.2f} mm)")
+    print(f"  Test MAE:                 {metrics['test_mae_m']:.6f} m ({metrics['test_mae_mm']:.2f} mm)")
+    print(f"  Classification accuracy:  {metrics['true_limit_classification_accuracy'] * 100.0:.2f}%")
+    print(f"  False feasible rate:      {metrics['true_limit_false_feasible_rate'] * 100.0:.2f}%")
+    print(f"  Near-boundary RMSE:       {metrics['near_boundary_rmse_mm']:.2f} mm")
 
-    print("\nTOP 3 INFLUENTIAL PARAMETERS FOR max_abs_xr:")
+    print("\nTop 3 influential parameters for max_abs_xr:")
     for i in range(min(3, len(ard_df))):
         print(
             f"  {i + 1}. {ard_df.iloc[i]['Parameter']:12s} "
             f"(relevance: {ard_df.iloc[i]['Relevance']:.3f})"
         )
 
-    print("\nOUTPUT:")
+    print("\nOutput:")
     print(f"  Model:             {GP_CONSTRAINT_RESULTS_DIR / 'gp_max_abs_xr_model.pkl'}")
     print(f"  Scalers:           {GP_CONSTRAINT_RESULTS_DIR / 'scaler_*_max_abs_xr.pkl'}")
     print(f"  Metrics:           {GP_CONSTRAINT_RESULTS_DIR / 'metrics_max_abs_xr.csv'}")
@@ -1385,9 +1492,12 @@ def main() -> None:
     print(f"  Model info:         {GP_CONSTRAINT_RESULTS_DIR / 'model_info_max_abs_xr.txt'}")
     print(f"  Predictions:        {GP_CONSTRAINT_RESULTS_DIR / 'test_predictions_max_abs_xr.csv'}")
     print(f"  Error analysis:     {GP_CONSTRAINT_RESULTS_DIR / 'test_prediction_errors_max_abs_xr.csv'}")
-    print(f"  Plots:              {GP_CONSTRAINT_FIGURES_DIR / 'max_abs_xr_*.png'}")
 
-    print("\nNext step: src/optimization_constraint_aware.py")
+    if not args.no_plots:
+        print(f"  Plots:              {GP_CONSTRAINT_FIGURES_DIR / 'max_abs_xr_*.png'}")
+
+    print("\nNext step:")
+    print("  Run the GP-based inverse optimization script.")
     print("=" * 70 + "\n")
 
 

@@ -5,41 +5,36 @@ visualize_optimized_motion.py
 Create a GIF or MP4 animation of an optimized extra-reach trajectory.
 
 The script:
-- loads a selected optimized solution;
-- lets the user choose method and target;
-- re-simulates the candidate with the true dynamic simulator;
-- creates a folder called visualization/;
-- saves an animation showing the compliant-base robot motion.
+    - loads a selected optimized solution;
+    - lets the user choose method and target;
+    - re-simulates the candidate with the true dynamic simulator;
+    - saves an animation of the compliant-base robot motion.
 
-Recommended usage:
-    python src/visualize_optimized_motion.py --method nn --target 0.65 --format gif
-    python src/visualize_optimized_motion.py --method gpde --target 0.75 --format gif
-    python src/visualize_optimized_motion.py --method bo --target 0.65 --format gif
-
-Methods:
-    nn, gpde, bo, random
+Author: Matteo Casazza
+Date: 2026
 """
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any, Dict, Tuple
-
 import argparse
+from pathlib import Path
+from typing import Any
+
+import matplotlib.patches as patches
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-from matplotlib.animation import FuncAnimation, PillowWriter, FFMpegWriter
+from matplotlib.animation import FFMpegWriter, FuncAnimation, PillowWriter
 
 from dynamics import simulate_system
 
 
 # =============================================================================
-# PATHS
+# PROJECT PATHS
 # =============================================================================
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
 VIS_DIR = PROJECT_ROOT / "figures" / "visualization"
 
 PHYSICAL_VALIDATION_SELECTED_PATH = (
@@ -51,23 +46,33 @@ PHYSICAL_VALIDATION_SELECTED_PATH = (
 
 FALLBACK_PATHS = {
     "gpde": [
-        PROJECT_ROOT / "results" / "optimization_gp_de_v2" / "gp_de_results.csv",
         PROJECT_ROOT / "results" / "optimization_gp_de" / "gp_de_results.csv",
     ],
     "nn": [
-        PROJECT_ROOT / "results" / "optimization_nn_gradient_v2_safe" / "nn_gradient_results.csv",
         PROJECT_ROOT / "results" / "optimization_nn_gradient" / "nn_gradient_results.csv",
+        PROJECT_ROOT / "results" / "optimization_nn_gradient" / "nn_adam_results.csv",
     ],
     "bo": [
+        PROJECT_ROOT / "results" / "optimization_bo_final" / "bo_final_results_by_seed.csv",
         PROJECT_ROOT / "results" / "optimization_bo_final" / "bo_final_results.csv",
-        PROJECT_ROOT / "results" / "bayesian_optimization" / "bo_final_results.csv",
-        PROJECT_ROOT / "results" / "bo_final" / "bo_final_results.csv",
+        PROJECT_ROOT / "results" / "optimization_bo_final" / "bo_final_all_results_by_seed.csv",
+        PROJECT_ROOT / "results" / "optimization_bo_final" / "bo_final_all_results.csv",
     ],
     "random": [
         PROJECT_ROOT / "results" / "optimization_bo_final" / "random_search_results.csv",
-        PROJECT_ROOT / "results" / "random_search" / "random_search_results.csv",
+        PROJECT_ROOT / "results" / "optimization_bo_final" / "random_search_final_results_by_seed.csv",
+        PROJECT_ROOT / "results" / "optimization_bo_final" / "bo_final_all_results_by_seed.csv",
+        PROJECT_ROOT / "results" / "optimization_bo_final" / "bo_final_all_results.csv",
     ],
 }
+
+
+# =============================================================================
+# SETTINGS
+# =============================================================================
+
+ROBOT_LIMIT_TRUE = 0.500
+FEASIBILITY_TOLERANCE_M = 1e-9
 
 PARAM_COLUMNS = [
     "Kb",
@@ -89,36 +94,41 @@ FIXED_DEFAULTS = {
     "Mr": 10.0,
 }
 
-ROBOT_LIMIT_TRUE = 0.500
+METHOD_DISPLAY = {
+    "nn": "NN+Adam",
+    "gpde": "GP+DE",
+    "bo": "BO",
+    "random": "Random Search",
+}
 
 
 # =============================================================================
-# LOADING HELPERS
+# BASIC UTILITIES
 # =============================================================================
 
 def ensure_dirs() -> None:
+    """Create visualization output directory."""
     VIS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def normalize_method_name(method: str) -> str:
+    """Normalize user method name."""
     method = method.lower().strip()
 
     aliases = {
         "nn": "nn",
         "nn_adam": "nn",
+        "nn adam": "nn",
         "nn+adam": "nn",
-        "nn+adam safe": "nn",
         "adam": "nn",
-
         "de": "gpde",
         "gpde": "gpde",
-        "gp+de": "gpde",
         "gp_de": "gpde",
-
+        "gp de": "gpde",
+        "gp+de": "gpde",
         "bo": "bo",
         "bayesian": "bo",
         "bayesian optimization": "bo",
-
         "random": "random",
         "random_search": "random",
         "random search": "random",
@@ -132,35 +142,49 @@ def normalize_method_name(method: str) -> str:
     return aliases[method]
 
 
-def method_matches(row_method: str, requested: str) -> bool:
-    m = str(row_method).lower().replace("_", " ").strip()
+def method_matches(row_method: Any, requested: str) -> bool:
+    """Check whether a row method label matches the requested method."""
+    method = str(row_method).lower().replace("_", " ").strip()
 
     if requested == "nn":
-        return "nn" in m or "adam" in m
+        return "nn" in method or "adam" in method
 
     if requested == "gpde":
-        return ("gp" in m and "de" in m) or "differential" in m
+        return ("gp" in method and "de" in method) or "differential" in method
 
     if requested == "bo":
-        return "bo" in m or "bayesian" in m
+        return (
+            method == "bo"
+            or "bo best" in method
+            or "bayesian" in method
+            or method.startswith("final bo")
+        )
 
     if requested == "random":
-        return "random" in m
+        return "random" in method
 
     return False
 
 
 def as_bool(value: Any) -> bool:
+    """Convert common boolean-like values to bool."""
+    if pd.isna(value):
+        return False
+
     if isinstance(value, (bool, np.bool_)):
         return bool(value)
 
     if isinstance(value, str):
         return value.strip().lower() in {"true", "1", "yes", "y"}
 
+    if isinstance(value, (float, int, np.floating, np.integer)):
+        return float(value) > 0.5
+
     return bool(value)
 
 
 def complete_parameter_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Add fixed physical parameters if only optimized columns are stored."""
     out = df.copy()
 
     for col, value in FIXED_DEFAULTS.items():
@@ -171,18 +195,20 @@ def complete_parameter_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def standardize_metric_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Create common metric columns independent of source CSV naming."""
     out = df.copy()
 
     rename_candidates = {
         "peak_y_true": "peak_y",
+        "true_peak_y": "peak_y",
         "y_sim": "peak_y",
         "y_true": "peak_y",
-
         "max_abs_xr_true": "max_abs_xr",
+        "true_max_abs_xr": "max_abs_xr",
         "max_xr_sim": "max_abs_xr",
-
         "target_error_abs_mm": "target_error_mm",
         "error_sim_mm": "target_error_mm",
+        "error_mm": "target_error_mm",
     }
 
     for old, new in rename_candidates.items():
@@ -195,39 +221,78 @@ def standardize_metric_columns(df: pd.DataFrame) -> pd.DataFrame:
     if "target_error_mm" not in out.columns and "target_error_m" in out.columns:
         out["target_error_mm"] = out["target_error_m"].astype(float) * 1000.0
 
-    if "residual_margin_mm" not in out.columns and "max_abs_xr" in out.columns:
-        out["residual_margin_mm"] = (
-            ROBOT_LIMIT_TRUE - out["max_abs_xr"].astype(float)
-        ) * 1000.0
+    if "max_abs_xr" in out.columns:
+        if "residual_margin_mm" not in out.columns:
+            out["residual_margin_mm"] = (
+                ROBOT_LIMIT_TRUE - out["max_abs_xr"].astype(float)
+            ) * 1000.0
 
-    if "constraint_violation_abs_m" not in out.columns and "max_abs_xr" in out.columns:
-        out["constraint_violation_abs_m"] = np.maximum(
-            0.0,
-            out["max_abs_xr"].astype(float) - ROBOT_LIMIT_TRUE,
-        )
+        if "constraint_violation_abs_m" not in out.columns:
+            out["constraint_violation_abs_m"] = np.maximum(
+                0.0,
+                out["max_abs_xr"].astype(float) - ROBOT_LIMIT_TRUE,
+            )
 
-    if (
-        "constraint_violation_abs_mm" not in out.columns
-        and "constraint_violation_abs_m" in out.columns
-    ):
-        out["constraint_violation_abs_mm"] = (
-            out["constraint_violation_abs_m"].astype(float) * 1000.0
-        )
+        if "constraint_violation_abs_mm" not in out.columns:
+            out["constraint_violation_abs_mm"] = (
+                out["constraint_violation_abs_m"].astype(float) * 1000.0
+            )
 
-    if "feasible_abs" not in out.columns and "max_abs_xr" in out.columns:
-        out["feasible_abs"] = out["max_abs_xr"].astype(float) <= ROBOT_LIMIT_TRUE + 1e-9
+        if "feasible_abs" not in out.columns:
+            out["feasible_abs"] = (
+                out["max_abs_xr"].astype(float)
+                <= ROBOT_LIMIT_TRUE + FEASIBILITY_TOLERANCE_M
+            )
 
     return out
 
 
-def selection_sort_key(row: pd.Series) -> Tuple[int, float, float]:
+def normalize_bo_random_rows(df: pd.DataFrame, requested: str) -> pd.DataFrame:
+    """Normalize method labels in BO final output files."""
+    out = df.copy()
+
+    if "method" not in out.columns:
+        if requested == "random":
+            out["method"] = "RandomSearch"
+        elif requested == "bo":
+            out["method"] = "BO"
+        else:
+            out["method"] = METHOD_DISPLAY.get(requested, requested)
+
+    if "run_label" in out.columns:
+        labels = out["run_label"].astype(str)
+
+        random_mask = labels.str.contains(
+            "Random|RandomSearch|RS",
+            case=False,
+            regex=True,
+        )
+        bo_mask = labels.str.contains("BO", case=False, regex=True)
+
+        out.loc[random_mask, "method"] = "RandomSearch"
+        out.loc[bo_mask & ~random_mask, "method"] = "BO"
+
+    return out
+
+
+def selection_sort_key(row: pd.Series) -> tuple[int, float, float]:
+    """
+    Select best candidate.
+
+    Priority:
+        feasible first;
+        if feasible, minimum target error;
+        if infeasible, minimum violation then target error.
+    """
     feasible = as_bool(row.get("feasible_abs", False))
 
     target_error_m = row.get("target_error_m", np.nan)
+
     if not np.isfinite(float(target_error_m)):
         target_error_m = float(row.get("target_error_mm", np.inf)) / 1000.0
 
     violation_m = row.get("constraint_violation_abs_m", np.nan)
+
     if not np.isfinite(float(violation_m)):
         violation_m = float(row.get("constraint_violation_abs_mm", np.inf)) / 1000.0
 
@@ -238,44 +303,56 @@ def selection_sort_key(row: pd.Series) -> Tuple[int, float, float]:
     )
 
 
-def load_candidate(method: str, target: float) -> pd.Series:
-    method = normalize_method_name(method)
+def row_to_params(row: pd.Series) -> dict[str, float]:
+    """Convert one selected row to simulator parameter dictionary."""
+    return {col: float(row[col]) for col in PARAM_COLUMNS}
 
-    candidate_tables = []
 
+# =============================================================================
+# CANDIDATE LOADING
+# =============================================================================
+
+def load_first_available_table(method: str) -> pd.DataFrame:
+    """Load preferred physical-validation table or method fallback table."""
     if PHYSICAL_VALIDATION_SELECTED_PATH.exists():
         df = pd.read_csv(PHYSICAL_VALIDATION_SELECTED_PATH)
         df["source_file"] = str(PHYSICAL_VALIDATION_SELECTED_PATH)
-        candidate_tables.append(df)
+        return df
 
-    if not candidate_tables:
-        for path in FALLBACK_PATHS.get(method, []):
-            if path.exists():
-                df = pd.read_csv(path)
-                df["source_file"] = str(path)
-                candidate_tables.append(df)
-                break
+    for path in FALLBACK_PATHS.get(method, []):
+        if path.exists():
+            df = pd.read_csv(path)
+            df["source_file"] = str(path)
+            return df
 
-    if not candidate_tables:
-        raise FileNotFoundError(
-            "No candidate result file found.\n"
-            f"Preferred file: {PHYSICAL_VALIDATION_SELECTED_PATH}\n"
-            f"Fallback paths for method {method}: {FALLBACK_PATHS.get(method, [])}"
-        )
+    raise FileNotFoundError(
+        "No candidate result file found.\n"
+        f"Preferred file: {PHYSICAL_VALIDATION_SELECTED_PATH}\n"
+        f"Fallback paths for method {method}:"
+        + "".join(f"\n  - {path}" for path in FALLBACK_PATHS.get(method, []))
+    )
 
-    df = pd.concat(candidate_tables, ignore_index=True, sort=False)
+
+def load_candidate(method: str, target: float) -> pd.Series:
+    """Load one optimized candidate for the selected method and target."""
+    method = normalize_method_name(method)
+
+    df = load_first_available_table(method)
+    df = normalize_bo_random_rows(df, requested=method)
     df = complete_parameter_columns(df)
     df = standardize_metric_columns(df)
 
-    missing_params = [c for c in PARAM_COLUMNS if c not in df.columns]
+    missing_params = [col for col in PARAM_COLUMNS if col not in df.columns]
+
     if missing_params:
         raise KeyError(
-            f"The candidate table does not contain all simulator parameters. "
-            f"Missing: {missing_params}"
+            "The candidate table does not contain all simulator parameters.\n"
+            f"Missing: {missing_params}\n"
+            f"Required: {PARAM_COLUMNS}"
         )
 
     if "method" in df.columns:
-        df = df[df["method"].apply(lambda x: method_matches(x, method))].copy()
+        df = df[df["method"].apply(lambda value: method_matches(value, method))].copy()
 
     if df.empty:
         raise ValueError(f"No rows found for method={method!r}.")
@@ -287,6 +364,7 @@ def load_candidate(method: str, target: float) -> pd.Series:
 
     if group.empty:
         available_targets = sorted(df["target"].astype(float).unique())
+
         raise ValueError(
             f"No candidate found for method={method!r}, target={target:.3f}.\n"
             f"Available targets for this method: {available_targets}"
@@ -304,10 +382,10 @@ def load_candidate(method: str, target: float) -> pd.Series:
     if "method" in selected:
         print(f"Row method:       {selected['method']}")
 
-    if "target_error_mm" in selected:
+    if "target_error_mm" in selected and pd.notna(selected["target_error_mm"]):
         print(f"Stored error:     {float(selected['target_error_mm']):.3f} mm")
 
-    if "residual_margin_mm" in selected:
+    if "residual_margin_mm" in selected and pd.notna(selected["residual_margin_mm"]):
         print(f"Stored margin:    {float(selected['residual_margin_mm']):.3f} mm")
 
     print("=" * 70)
@@ -315,15 +393,12 @@ def load_candidate(method: str, target: float) -> pd.Series:
     return selected
 
 
-def row_to_params(row: pd.Series) -> Dict[str, float]:
-    return {col: float(row[col]) for col in PARAM_COLUMNS}
-
-
 # =============================================================================
 # SIMULATION HELPERS
 # =============================================================================
 
-def extract_solution_and_metrics(output: Any) -> Tuple[Any, Dict[str, Any]]:
+def extract_solution_and_metrics(output: Any) -> tuple[Any, dict[str, Any]]:
+    """Extract ODE solution and metrics dictionary from simulator output."""
     sol = None
     metrics = None
 
@@ -349,60 +424,96 @@ def extract_solution_and_metrics(output: Any) -> Tuple[Any, Dict[str, Any]]:
     return sol, metrics
 
 
-def simulate_candidate_with_solution(
-    params: Dict[str, float],
+def complete_simulation_metrics(
+    metrics: dict[str, Any],
     target: float,
-    T_sim: float = 60.0,
+    y: np.ndarray,
+    x_b: np.ndarray,
+    x_r: np.ndarray,
+) -> dict[str, Any]:
+    """Complete scalar metrics from the full trajectory."""
+    completed = dict(metrics)
+
+    peak_y = float(np.max(y))
+    max_abs_xr = float(np.max(np.abs(x_r)))
+    max_abs_xb = float(np.max(np.abs(x_b)))
+    target_error_mm = abs(peak_y - float(target)) * 1000.0
+    residual_margin_mm = (ROBOT_LIMIT_TRUE - max_abs_xr) * 1000.0
+    violation_mm = max(0.0, max_abs_xr - ROBOT_LIMIT_TRUE) * 1000.0
+
+    completed["peak_y"] = peak_y
+    completed["max_abs_xr"] = max_abs_xr
+    completed["max_abs_xb"] = max_abs_xb
+    completed["target_error_mm"] = target_error_mm
+    completed["residual_margin_mm"] = residual_margin_mm
+    completed["constraint_violation_abs_mm"] = violation_mm
+    completed["feasible_abs"] = violation_mm <= FEASIBILITY_TOLERANCE_M * 1000.0
+    completed["max_xr"] = float(np.max(x_r))
+    completed["min_xr"] = float(np.min(x_r))
+    completed["max_xb"] = float(np.max(x_b))
+    completed["min_xb"] = float(np.min(x_b))
+    completed["extra_reach"] = peak_y - ROBOT_LIMIT_TRUE
+
+    return completed
+
+
+def simulate_candidate_with_solution(
+    params: dict[str, float],
+    target: float,
+    t_sim: float = 60.0,
     dt: float = 0.001,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
+    """Run the true simulator and return t, y, x_b, x_r and metrics."""
     attempts = [
-        dict(
-            y_target=float(target),
-            x_r_max=ROBOT_LIMIT_TRUE,
-            return_metrics=True,
-            return_full=True,
-        ),
-        dict(
-            y_target=float(target),
-            x_r_max=ROBOT_LIMIT_TRUE,
-            return_metrics=True,
-            return_solution=True,
-        ),
-        dict(
-            T_sim=T_sim,
-            dt=dt,
-            return_full=True,
-        ),
-        dict(
-            T_sim=T_sim,
-            dt=dt,
-            return_solution=True,
-        ),
+        {
+            "T_sim": t_sim,
+            "dt": dt,
+            "y_target": float(target),
+            "x_r_max": ROBOT_LIMIT_TRUE,
+            "return_metrics": True,
+            "return_full": True,
+        },
+        {
+            "T_sim": t_sim,
+            "dt": dt,
+            "y_target": float(target),
+            "x_r_max": ROBOT_LIMIT_TRUE,
+            "return_metrics": True,
+            "return_solution": True,
+        },
+        {
+            "T_sim": t_sim,
+            "dt": dt,
+            "return_metrics": True,
+            "return_full": True,
+        },
+        {
+            "T_sim": t_sim,
+            "dt": dt,
+            "return_metrics": True,
+            "return_solution": True,
+        },
     ]
 
-    last_error = None
+    last_error: Exception | None = None
 
     for kwargs in attempts:
         try:
             output = simulate_system(params, **kwargs)
             sol, metrics = extract_solution_and_metrics(output)
 
-            t = np.asarray(sol.t)
-            x_b = np.asarray(sol.y[2])
-            x_r = np.asarray(sol.y[3])
+            t = np.asarray(sol.t, dtype=float)
+            x_b = np.asarray(sol.y[2], dtype=float)
+            x_r = np.asarray(sol.y[3], dtype=float)
             y = x_b + x_r
 
-            max_abs_xr = float(np.max(np.abs(x_r)))
-            peak_y = float(np.max(y))
-            target_error_mm = abs(peak_y - float(target)) * 1000.0
-            residual_margin_mm = (ROBOT_LIMIT_TRUE - max_abs_xr) * 1000.0
-
-            metrics = dict(metrics)
-            metrics.setdefault("peak_y", peak_y)
-            metrics.setdefault("max_abs_xr", max_abs_xr)
-            metrics.setdefault("target_error_mm", target_error_mm)
-            metrics.setdefault("residual_margin_mm", residual_margin_mm)
-            metrics.setdefault("feasible_abs", residual_margin_mm >= -1e-6)
+            metrics = complete_simulation_metrics(
+                metrics=metrics,
+                target=target,
+                y=y,
+                x_b=x_b,
+                x_r=x_r,
+            )
 
             return t, y, x_b, x_r, metrics
 
@@ -411,7 +522,7 @@ def simulate_candidate_with_solution(
             continue
 
     raise RuntimeError(
-        "simulate_system could not be called with any supported interface."
+        "simulate_system could not be called with any supported full-solution interface."
     ) from last_error
 
 
@@ -420,7 +531,7 @@ def simulate_candidate_with_solution(
 # =============================================================================
 
 def draw_spring(
-    ax,
+    ax: plt.Axes,
     x0: float,
     x1: float,
     y: float,
@@ -428,6 +539,7 @@ def draw_spring(
     coils: int = 6,
     color: str = "black",
 ) -> None:
+    """Draw a compact zig-zag spring between x0 and x1."""
     if x1 <= x0 + 0.005:
         ax.plot([x0, x1], [y, y], color=color, linewidth=1.5)
         return
@@ -436,12 +548,13 @@ def draw_spring(
     xs = np.linspace(x0 + lead, x1 - lead, 2 * coils + 1)
     ys = np.full_like(xs, y)
 
-    for i in range(1, len(xs) - 1):
-        ys[i] = y + amplitude * (1 if i % 2 else -1)
+    for index in range(1, len(xs) - 1):
+        ys[index] = y + amplitude * (1 if index % 2 else -1)
 
     ax.plot([x0, x0 + lead], [y, y], color=color, linewidth=1.5)
     ax.plot(xs, ys, color=color, linewidth=2.0)
     ax.plot([x1 - lead, x1], [y, y], color=color, linewidth=1.5)
+
 
 # =============================================================================
 # ANIMATION
@@ -454,19 +567,20 @@ def create_motion_animation(
     y: np.ndarray,
     x_b: np.ndarray,
     x_r: np.ndarray,
-    metrics: Dict[str, Any],
+    metrics: dict[str, Any],
     save_path: Path,
     fps: int = 25,
     duration: float = 14.0,
     format_name: str = "gif",
 ) -> None:
+    """Create and save GIF or MP4 motion animation."""
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
-    n_frames = int(fps * duration)
+    n_frames = max(2, int(fps * duration))
     frame_idx = np.linspace(0, len(t) - 1, n_frames, dtype=int)
 
-    peak_y = float(np.max(y))
-    max_abs_xr = float(np.max(np.abs(x_r)))
+    peak_y = float(metrics.get("peak_y", np.max(y)))
+    max_abs_xr = float(metrics.get("max_abs_xr", np.max(np.abs(x_r))))
     residual_margin_mm = (ROBOT_LIMIT_TRUE - max_abs_xr) * 1000.0
     target_error_mm = abs(peak_y - float(target)) * 1000.0
 
@@ -482,7 +596,8 @@ def create_motion_animation(
     )
 
     fig.suptitle(
-        f"Optimized motion visualization — {method.upper()}, target = {target:.2f} m",
+        f"Optimized motion visualization — {METHOD_DISPLAY.get(method, method)}, "
+        f"target = {target:.2f} m",
         fontsize=14,
         fontweight="bold",
         y=0.98,
@@ -495,13 +610,13 @@ def create_motion_animation(
     base_color = "#AFC7FF"
     robot_color = "#C8E7A8"
 
-    def update(k: int):
-        idx = frame_idx[k]
+    def update(frame_number: int) -> list[Any]:
+        idx = int(frame_idx[frame_number])
 
-        tc = float(t[idx])
+        current_t = float(t[idx])
         xb = float(x_b[idx])
         xr = float(x_r[idx])
-        yc = float(y[idx])
+        current_y = float(y[idx])
         peak_so_far = float(np.max(y[:idx + 1]))
 
         ax_sys.clear()
@@ -519,9 +634,8 @@ def create_motion_animation(
 
         wall_x = 0.0
         base_x = xb
-        robot_x = yc
+        robot_x = current_y
 
-        # Wall
         wall = patches.Rectangle(
             (wall_x - 0.008, 0.27),
             0.008,
@@ -532,7 +646,6 @@ def create_motion_animation(
         )
         ax_sys.add_patch(wall)
 
-        # Springs only
         draw_spring(
             ax_sys,
             wall_x,
@@ -553,7 +666,6 @@ def create_motion_animation(
             color="tab:green",
         )
 
-        # Masses
         base_rect = patches.FancyBboxPatch(
             (base_x - mass_w / 2, y_mass - mass_h / 2),
             mass_w,
@@ -580,7 +692,6 @@ def create_motion_animation(
         ax_sys.text(base_x, y_mass, r"$M_b$", ha="center", va="center", fontsize=18)
         ax_sys.text(robot_x, y_mass, r"$M_r$", ha="center", va="center", fontsize=18)
 
-        # Vertical reference lines
         ax_sys.axvline(
             ROBOT_LIMIT_TRUE,
             color="tab:red",
@@ -598,7 +709,7 @@ def create_motion_animation(
         )
 
         ax_sys.axvline(
-            yc,
+            current_y,
             color="black",
             linestyle="-",
             linewidth=1.4,
@@ -614,12 +725,11 @@ def create_motion_animation(
             label="Peak so far",
         )
 
-        # Info box
         info = (
-            f"t = {tc:5.2f} s\n"
+            f"t = {current_t:5.2f} s\n"
             f"x_b = {xb:+.4f} m\n"
             f"x_r = {xr:+.4f} m\n"
-            f"y = {yc:+.4f} m\n"
+            f"y = {current_y:+.4f} m\n"
             f"peak_y = {peak_y:.4f} m\n"
             f"error = {target_error_mm:.2f} mm\n"
             f"margin = {residual_margin_mm:.2f} mm"
@@ -662,7 +772,7 @@ def create_motion_animation(
             t[:idx + 1],
             x_b[:idx + 1],
             linewidth=1.6,
-            color="tab:blue",
+            color="tab:cyan",
             label=r"$x_b(t)$",
         )
 
@@ -690,12 +800,12 @@ def create_motion_animation(
             label="Final peak",
         )
 
-        ax_time.plot(tc, yc, "o", color="black", markersize=5)
+        ax_time.plot(current_t, current_y, "o", color="black", markersize=5)
 
         ax_time.set_xlim(0.0, float(t[-1]))
 
-        y_min = min(float(np.min(x_b)), -0.05) - 0.03
-        y_max = max(float(target), peak_y, ROBOT_LIMIT_TRUE) + 0.07
+        y_min = min(float(np.min(x_b)), float(np.min(x_r)), -0.05) - 0.03
+        y_max = max(float(target), peak_y, ROBOT_LIMIT_TRUE, float(np.max(y))) + 0.07
 
         ax_time.set_ylim(y_min, y_max)
         ax_time.set_xlabel("Time [s]")
@@ -706,7 +816,7 @@ def create_motion_animation(
 
         return []
 
-    anim = FuncAnimation(
+    animation = FuncAnimation(
         fig,
         update,
         frames=n_frames,
@@ -725,11 +835,17 @@ def create_motion_animation(
 
     if format_name.lower() == "gif":
         writer = PillowWriter(fps=fps)
-        anim.save(save_path, writer=writer, dpi=110)
+        animation.save(save_path, writer=writer, dpi=110)
 
     elif format_name.lower() == "mp4":
-        writer = FFMpegWriter(fps=fps, bitrate=2500)
-        anim.save(save_path, writer=writer, dpi=140)
+        try:
+            writer = FFMpegWriter(fps=fps, bitrate=2500)
+            animation.save(save_path, writer=writer, dpi=140)
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                "MP4 export requires ffmpeg, but ffmpeg was not found. "
+                "Install ffmpeg or use --format gif."
+            ) from exc
 
     else:
         raise ValueError("format_name must be 'gif' or 'mp4'.")
@@ -737,14 +853,15 @@ def create_motion_animation(
     plt.close(fig)
 
     print(f"\nSaved animation: {save_path}")
-    print(f"File size: {save_path.stat().st_size / 1024:.1f} KB")
+    print(f"File size: {save_path.stat().st_size / 1024.0:.1f} KB")
 
 
 # =============================================================================
-# MAIN
+# COMMAND LINE
 # =============================================================================
 
-def main() -> None:
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
         description="Create GIF/MP4 visualization of optimized compliant-base motion."
     )
@@ -800,7 +917,12 @@ def main() -> None:
         help="Simulation time step.",
     )
 
-    args = parser.parse_args()
+    return parser.parse_args()
+
+
+def main() -> None:
+    """Create optimized-motion animation."""
+    args = parse_args()
 
     ensure_dirs()
 
@@ -813,11 +935,11 @@ def main() -> None:
     t, y, x_b, x_r, metrics = simulate_candidate_with_solution(
         params=params,
         target=target,
-        T_sim=args.T_sim,
-        dt=args.dt,
+        t_sim=float(args.T_sim),
+        dt=float(args.dt),
     )
 
-    tag = f"{method}_target{int(round(target * 1000)):04d}"
+    tag = f"{method}_target{int(round(target * 1000.0)):04d}"
     save_path = VIS_DIR / f"motion_{tag}.{args.format.lower()}"
 
     print("\nRecomputed true-simulator metrics")
@@ -837,8 +959,8 @@ def main() -> None:
         x_r=x_r,
         metrics=metrics,
         save_path=save_path,
-        fps=args.fps,
-        duration=args.duration,
+        fps=int(args.fps),
+        duration=float(args.duration),
         format_name=args.format,
     )
 
